@@ -1,0 +1,40 @@
+name: usage-guard
+version: 0.2.1
+description: "Usage-exhaustion guard: polls agent.account_usage.fetch_account_usage (own cache, no quota-plugin dependency) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; configurable stale-data policy (fail-closed by default)."
+author: mister-ideas
+license: MIT
+kind: standalone
+requires_hermes: ">=0.21"
+provides_tools: []
+provides_hooks: []
+provides_middleware:
+  - llm_execution
+config_schema:
+  provider_keys:
+    type: list
+    default: ["anthropic", "openai-codex"]
+    description: "Provider IDs (middleware payload) this guard gates on usage data; add custom provider plugin IDs here"
+  provider_sources:
+    type: dict
+    default: {"anthropic": "anthropic", "openai-codex": "openai-codex"}
+    description: "provider-id -> fetch_account_usage data-source key; unmapped providers use their own ID"
+  threshold_percent:
+    type: float
+    default: 100.0
+    description: "Deny when ANY window used_percent >= this value on a fresh snapshot (100 = block only at 0% left)"
+  max_cache_age_s:
+    type: float
+    default: 60.0
+    description: "Snapshots older than this are stale; stale/missing data follows the fail_open policy"
+  poll_wait_timeout_s:
+    type: float
+    default: 20.0
+    description: "On a stale snapshot, wait up to this many seconds for a synchronous refresh before applying the fail_open policy (0 disables the wait)"
+  fail_open:
+    type: bool
+    default: false
+    description: "Allow requests when usage data is stale/missing/unavailable (false = deny, recommended)"
+  refresh_every_request:
+    type: bool
+    default: true
+    description: "Require a new usage snapshot at every guarded ingress; unconfirmed refresh denies"

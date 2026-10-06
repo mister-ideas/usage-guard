@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests before packaging
+        run: |
+          python -m pip install pytest pyyaml
+          python -m pytest tests -q
+
+      - name: Build package
+        run: python scripts/package.py
+
+      - name: Create GitHub release with the plugin zip
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/usage-guard-*.zip \
+            --title "usage-guard $GITHUB_REF_NAME" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
