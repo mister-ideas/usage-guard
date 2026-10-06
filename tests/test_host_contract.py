@@ -64,3 +64,19 @@ def test_aux_middleware_seam_state():
 
     has_seam = "run_llm_execution_middleware" in inspect.getsource(ah)
     print(f"aux-middleware seam present: {has_seam} (upstream expectation: False)")
+
+
+def test_moa_config_surface_available():
+    """The resolver the guard's provider="moa" branch depends on (stock surface)."""
+    from hermes_cli.moa_config import normalize_moa_config
+
+    cfg = normalize_moa_config({
+        "default_preset": "default",
+        "presets": {"default": {
+            "reference_models": [{"provider": "anthropic", "model": "claude-opus-5-5"}],
+            "aggregator": {"provider": "fireworks", "model": "agg"},
+        }},
+    })
+    preset = cfg["presets"]["default"]
+    assert preset["reference_models"][0]["provider"] == "anthropic"
+    assert preset["aggregator"]["provider"] == "fireworks"
