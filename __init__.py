@@ -9,9 +9,11 @@ long runs never act on late usage information.
 
 Own account-usage cache; no quota-plugin dependency. Refusal replies are marked
 usage_guard_blocked so host auxiliary paths reject them before provider dispatch.
-Requires companion host auxiliary execution-middleware integration. Other clients,
-in-flight requests, missing plugins, and credential mismatches remain outside
-this guard.
+On stock Hermes this gates main-loop llm_execution dispatches, including MoA
+turns (the running preset's enabled slots are resolved and checked). Auxiliary
+calls — compression, vision, titles, and the MoA advisor fan-out — are
+observer-only upstream and are NOT gated. Other clients, in-flight requests,
+missing plugins, and credential mismatches remain outside this guard.
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ Author: **mister-ideas**. MIT-licensed Hermes native plugin.
 
 Registers `llm_execution` middleware, with an independent cache over `agent.account_usage.fetch_account_usage`. It never imports the quota plugin.
 
-**The only blocking point is a subscription usage window at/over the threshold.** With `threshold_percent=100`, requests pass while any subscription allowance remains (0% left = blocked) and are denied the moment a window is fully used. No account-level extra-usage or credit state is read or enforced; the plugin never touches account or billing settings.
+**The only blocking point is a subscription usage window at/over the threshold.** With `threshold_percent=100`, requests pass while any subscription allowance remains (0% left = blocked) and are denied the moment a window is fully used. No account-level extra-usage or credit state is read or enforced; the plugin never touches account or billing settings. MoA turns are gated through the running preset: every enabled reference slot and the aggregator whose provider is in `provider_keys` is checked, and the turn is refused when any of them is exhausted.
 
 Defaults: guard `anthropic` and `openai-codex` (stock providers); refresh at every ingress (20-second bounded wait); deny at the threshold; maximum snapshot age 60 seconds; `fail_open=false`.
 
@@ -53,9 +53,19 @@ to another provider or wait for the reset.
 
 Blocked responses carry `usage_guard_blocked=True` so callers can distinguish a policy refusal from a provider answer.
 
-## Auxiliary calls on stock Hermes
+## What stock Hermes can and cannot gate
 
-**Auxiliary calls (compression, vision, background review) are not gated by this plugin on stock upstream Hermes**: they bypass `llm_execution` middleware there. This plugin uses public plugin surfaces only and does not patch or rebind Hermes core. On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
+Gated (the `llm_execution` middleware is the only stock enforcement point):
+
+- Main-loop dispatches for any provider listed in `provider_keys`.
+- MoA turns (`provider="moa"`): the running preset is resolved through core's `normalize_moa_config`, and every **enabled reference slot** and the **aggregator** whose provider is in `provider_keys` is checked; the turn is refused when any of them is exhausted. A preset that cannot be resolved is refused unless `fail_open` is true.
+
+Not gated on stock Hermes (observer-only upstream hooks; this plugin does not patch core):
+
+- Auxiliary calls: compression, vision, background review, titles — and the **MoA advisor fan-out**, which runs as an auxiliary call during request assembly, *before* the middleware.
+- Consequence: a MoA turn refused because a guarded slot is exhausted has already dispatched that turn's advisor fan-out. The refusal stops the aggregator and every later iteration; switch `/model` to stop advisor spend.
+
+On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
 
 ## Configuration
 

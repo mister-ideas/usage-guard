@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 — 2026-10-06
+
+MoA-aware gating, plus a precise statement of what stock Hermes cannot enforce.
+
+### Guard behavior
+
+- MoA turns (`provider="moa"` — the middleware payload for every `provider: moa` session) resolve the running preset through core's `normalize_moa_config` and gate every enabled reference slot plus the aggregator whose provider is in `provider_keys`; the turn is refused with the standard notice when any of them is exhausted. An unresolvable preset follows `fail_open` (deny by default).
+- Documented stock limitation: the MoA advisor fan-out and other auxiliary calls (compression, vision, background review) run through observer-only upstream hooks and cannot be gated by a plugin; a refused MoA turn has already dispatched that turn's advisors. See README "What stock Hermes can and cannot gate".
+
 ## 0.2.1 — 2026-10-05
 
 First public-preparation release. The guard blocks provider calls exactly when a subscription usage window reaches `threshold_percent` (default 100 = 0% left) on fresh, confirmed evidence — and never otherwise.

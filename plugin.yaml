@@ -1,5 +1,5 @@
 name: usage-guard
-version: 0.2.1
+version: 0.2.2
 description: "Usage-exhaustion guard: polls agent.account_usage.fetch_account_usage (own cache, no quota-plugin dependency) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
