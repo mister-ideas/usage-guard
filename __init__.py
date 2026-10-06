@@ -768,6 +768,97 @@ def _spawn_poll_for_source(source_key: str, sync_timeout_s: float = 0.0) -> None
     _spawn_poll(source_key, _fetch, sync_timeout_s=sync_timeout_s)
 
 
+# ── MoA (virtual provider) slots ────────────────────────────────────────────
+
+def _normalize_moa_config(moa_raw: Any) -> Any:
+    """Core's MoA normalizer, imported lazily so the guard never vendors a copy."""
+    from hermes_cli.moa_config import normalize_moa_config
+
+    return normalize_moa_config(moa_raw or {})
+
+
+def _moa_slot_providers(moa_raw: Any, model: Any) -> Optional[tuple[str, list[str]]]:
+    """``(preset_name, slot_providers)`` for the MoA preset a turn runs, or None.
+
+    ``slot_providers`` are the enabled reference-slot providers followed by the
+    aggregator provider, in preset order. None means the preset could not be
+    resolved (no core resolver, malformed config, unknown preset).
+    """
+    try:
+        cfg = _normalize_moa_config(moa_raw)
+    except Exception:
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    presets = cfg.get("presets")
+    if not isinstance(presets, dict) or not presets:
+        return None
+    name = str(model or "").strip()
+    if name not in presets:
+        name = str(cfg.get("default_preset") or "").strip()
+    preset = presets.get(name)
+    if not isinstance(preset, dict):
+        return None
+    providers: list[str] = []
+    if preset.get("enabled", True):
+        for slot in preset.get("reference_models") or []:
+            if not isinstance(slot, dict) or not slot.get("enabled", True):
+                continue
+            provider = str(slot.get("provider") or "").strip()
+            if provider:
+                providers.append(provider)
+    aggregator = preset.get("aggregator")
+    if isinstance(aggregator, dict):
+        provider = str(aggregator.get("provider") or "").strip()
+        if provider:
+            providers.append(provider)
+    return name, providers
+
+
+def _moa_preset_slots(model: Any) -> Optional[tuple[str, list[str]]]:
+    """Resolve the running MoA preset's slot providers from the live config."""
+    try:
+        from hermes_cli.config import load_config
+
+        moa_raw = (load_config() or {}).get("moa")
+    except Exception:
+        return None
+    return _moa_slot_providers(moa_raw, model)
+
+
+def _gate_moa(kwargs: dict[str, Any], settings: dict[str, Any], config_ok: bool,
+              downstream: Callable[[Any], Any], request: Any) -> Any:
+    """Gate one MoA turn: deny when any guarded preset slot's provider is exhausted.
+
+    Stock Hermes cannot gate the advisor fan-out itself (it runs in request
+    assembly, before this middleware, as an observer-only auxiliary call); the
+    denial stops the aggregator dispatch and every later iteration.
+    """
+    resolved = _moa_preset_slots(kwargs.get("model"))
+    if resolved is None:
+        if settings["fail_open"] and config_ok:
+            LOG.warning("usage-guard: could not resolve the MoA preset %r; allowing (fail_open)",
+                        kwargs.get("model"))
+            return downstream(request)
+        LOG.warning("usage-guard: could not resolve the MoA preset %r; denying", kwargs.get("model"))
+        return _blocked_response(
+            kwargs.get("api_mode"), kwargs.get("model"),
+            "Usage guard: this MoA preset could not be resolved, so its providers could not be "
+            "checked against the usage policy; fail-open is disabled, so the request was not sent.",
+        )
+    preset_name, slot_providers = resolved
+    for slot_provider in slot_providers:
+        if slot_provider not in settings["provider_keys"]:
+            continue
+        source_key = settings["provider_sources"].get(slot_provider, slot_provider)
+        decision = _decide_provider(slot_provider, source_key, settings, config_ok)
+        if not decision.allow:
+            LOG.warning("usage-guard denied MoA preset=%s slot_provider=%s model=%s (%s)",
+                        preset_name, slot_provider, kwargs.get("model"), decision.reason)
+            return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
+    return downstream(request)
+
+
 # ── response shaping (per documented Hermes adapter shapes) ──────────────────
 
 def _blocked_response(api_mode: Any, model: Any, text: str) -> Any:
@@ -838,6 +929,8 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
                 "not sent to the provider. Fix plugins.entries.usage-guard.settings "
                 "or remove/uninstall the plugin.",
             )
+        if provider == "moa":
+            return _gate_moa(kwargs, settings, config_ok, downstream, request)
         if provider not in settings["provider_keys"]:
             return downstream(request)
         source_key = settings["provider_sources"].get(provider, provider)

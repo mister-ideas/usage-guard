@@ -419,3 +419,114 @@ def test_manifest_declares_only_middleware():
 def _root():
     from pathlib import Path
     return Path(__file__).resolve().parents[1]
+
+
+# ── MoA turns (provider="moa"): the running preset's slots are gated ─────────
+
+MOA_RAW = {
+    "default_preset": "default",
+    "presets": {
+        "default": {
+            "enabled": True,
+            "reference_models": [
+                {"provider": "openai-codex", "model": "gpt-6.1-sol", "enabled": True},
+                {"provider": "anthropic", "model": "claude-opus-5-5", "enabled": True},
+                {"provider": "openrouter", "model": "off", "enabled": False},
+            ],
+            "aggregator": {"provider": "fireworks", "model": "agg"},
+        },
+        "other": {
+            "enabled": False,
+            "reference_models": [{"provider": "anthropic", "model": "claude-opus-5-5"}],
+            "aggregator": {"provider": "fireworks", "model": "agg"},
+        },
+    },
+}
+
+
+def _identity_normalize(raw):
+    return raw
+
+
+def test_moa_slot_providers_lists_enabled_refs_then_aggregator(guard):
+    with patch.object(guard, "_normalize_moa_config", side_effect=_identity_normalize):
+        assert guard._moa_slot_providers(MOA_RAW, "default") == (
+            "default", ["openai-codex", "anthropic", "fireworks"])
+
+
+def test_moa_slot_providers_skips_disabled_preset_refs(guard):
+    with patch.object(guard, "_normalize_moa_config", side_effect=_identity_normalize):
+        assert guard._moa_slot_providers(MOA_RAW, "other") == ("other", ["fireworks"])
+
+
+def test_moa_slot_providers_falls_back_to_default_preset(guard):
+    with patch.object(guard, "_normalize_moa_config", side_effect=_identity_normalize):
+        assert guard._moa_slot_providers(MOA_RAW, "does-not-exist") == (
+            "default", ["openai-codex", "anthropic", "fireworks"])
+
+
+def test_moa_slot_providers_returns_none_when_unresolvable(guard):
+    with patch.object(guard, "_normalize_moa_config", side_effect=RuntimeError("no core")):
+        assert guard._moa_slot_providers(MOA_RAW, "default") is None
+    with patch.object(guard, "_normalize_moa_config", side_effect=_identity_normalize):
+        assert guard._moa_slot_providers({}, "default") is None
+        assert guard._moa_slot_providers({"presets": {}}, "default") is None
+
+
+def invoke_moa(guard, records, providers, model="default", **settings):
+    """Run one MoA gate with a hand-built per-provider cache and slot list."""
+    policy = dict(guard.DEFAULTS, refresh_every_request=False)
+    policy.update(settings)
+    calls = []
+    with patch.object(guard, "_read_cache", return_value={"providers": records}), \
+         patch.object(guard, "_spawn_poll_for_source"), \
+         patch.object(guard, "_moa_preset_slots", return_value=(model, providers)):
+        out = guard.gate_llm_execution(
+            lambda key, default: policy.get(key, default),
+            provider="moa", model=model, api_mode="chat_completions",
+            request={}, next_call=lambda req: calls.append(req))
+    return out, calls
+
+
+def test_moa_turn_denied_when_a_guarded_slot_is_exhausted(guard):
+    records = {"openai-codex": make_record(10), "anthropic": make_record(100)}
+    out, calls = invoke_moa(guard, records, ["openai-codex", "anthropic", "fireworks"])
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_moa_turn_allowed_when_guarded_slots_are_healthy(guard):
+    records = {"openai-codex": make_record(10), "anthropic": make_record(10)}
+    _, calls = invoke_moa(guard, records, ["openai-codex", "anthropic", "fireworks"])
+    assert calls == [{}]
+
+
+def test_moa_turn_ignores_slots_outside_provider_keys(guard):
+    _, calls = invoke_moa(guard, {"fireworks": make_record(100)}, ["fireworks"])
+    assert calls == [{}]
+
+
+def test_moa_turn_denied_when_preset_is_unresolvable(guard):
+    calls = []
+    with patch.object(guard, "_read_cache", return_value={"providers": {}}), \
+         patch.object(guard, "_spawn_poll_for_source"), \
+         patch.object(guard, "_moa_preset_slots", return_value=None):
+        out = guard.gate_llm_execution(
+            lambda key, default: dict(guard.DEFAULTS, refresh_every_request=False).get(key, default),
+            provider="moa", model="default", api_mode="chat_completions",
+            request={}, next_call=lambda req: calls.append(req))
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_moa_turn_allows_unresolvable_preset_when_fail_open(guard):
+    calls = []
+    with patch.object(guard, "_read_cache", return_value={"providers": {}}), \
+         patch.object(guard, "_spawn_poll_for_source"), \
+         patch.object(guard, "_moa_preset_slots", return_value=None):
+        guard.gate_llm_execution(
+            lambda key, default: dict(guard.DEFAULTS, refresh_every_request=False,
+                                      fail_open=True).get(key, default),
+            provider="moa", model="default", api_mode="chat_completions",
+            request={}, next_call=lambda req: calls.append(req))
+    assert calls == [{}]
