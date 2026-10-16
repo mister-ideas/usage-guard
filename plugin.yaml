@@ -1,5 +1,5 @@
 name: usage-guard
-version: 0.1.4
+version: 0.1.5
 description: "Usage-exhaustion guard: reads account usage into its own cache (core fetcher; a direct read for the Anthropic source, whose host parser inflates sub-1% windows) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
@@ -18,6 +18,10 @@ config_schema:
     type: dict
     default: {"anthropic": "anthropic", "openai-codex": "openai-codex"}
     description: "provider-id -> fetch_account_usage data-source key; unmapped providers use their own ID"
+  source_min_intervals:
+    type: dict
+    default: {"anthropic": 180.0, "openai-codex": 180.0, "openrouter": 30.0}
+    description: "data-source key -> smallest safe seconds between two reads; Anthropic's usage endpoint has a small hourly budget shared with Claude Code itself, OpenRouter publishes a 20 req/min floor. Undeclared sources use min_fetch_interval_s"
   source_scales:
     type: dict
     default: {"anthropic": "percent", "openai-codex": "percent", "openrouter": "percent"}
