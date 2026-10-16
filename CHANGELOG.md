@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5 — 2026-10-16
+
+Refresh cadence is per provider, at the smallest safe interval each one allows.
+
+### Guard behavior
+
+- `source_min_intervals` (new): the smallest safe seconds between two reads of a source. Providers differ by orders of magnitude, so one global floor either starves the freshest source or hammers the most sensitive one. Defaults: `anthropic` 180, `openai-codex` 180, `openrouter` 30; an undeclared source falls back to `min_fetch_interval_s`.
+- The Anthropic floor is 180s because that endpoint has a small hourly budget per account that Claude Code itself and every other usage tool on the machine draw from: pollers reading it every 30-60s are documented to hit a persistent 429 loop and to starve Claude Code's own usage panel. OpenRouter publishes a 20 requests/minute floor, so 30s is comfortable there.
+- The effective cadence is `max(max_cache_age_s, per-source floor)`, and the floor is claimed atomically under the cache's file lock, so any number of concurrent sessions — one process or several — share one read per interval per source.
+
 ## 0.1.4 — 2026-10-16
 
 Per-request refresh is gone; refreshes are rate-budgeted and shared.

@@ -266,6 +266,8 @@ def test_stock_defaults_are_setup_agnostic(guard):
     assert guard.DEFAULTS["provider_sources"] == {"anthropic": "anthropic", "openai-codex": "openai-codex"}
     assert guard.DEFAULTS["threshold_percent"] == 100.0
     assert guard.DEFAULTS["fail_open"] is False
+    assert guard.DEFAULTS["source_min_intervals"] == {
+        "anthropic": 180.0, "openai-codex": 180.0, "openrouter": 30.0}
     assert "refresh_every_request" not in guard.DEFAULTS
 
 
@@ -850,6 +852,61 @@ def test_concurrent_callers_collapse_into_one_read(guard, tmp_path, monkeypatch)
         for thread in threads:
             thread.join(timeout=10)
     assert reads == ["anthropic"]
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("anthropic", 180.0), ("openai-codex", 180.0), ("openrouter", 30.0),
+])
+def test_gate_uses_the_per_source_floor(guard, source, expected):
+    """Each provider is read no faster than its own safe cadence."""
+    policy = dict(guard.DEFAULTS, provider_keys=["alias"],
+                  provider_sources={"alias": source})
+    record = _aged(3600, used=10)
+    with patch.object(guard, "_read_cache", return_value={"providers": {source: record}}), \
+         patch.object(guard, "_spawn_poll_for_source") as poll:
+        guard.gate_llm_execution(
+            lambda k, d: policy.get(k, d), provider="alias", model="offline",
+            api_mode="chat_completions", request={}, next_call=lambda r: None)
+    assert poll.call_args.kwargs["min_interval_s"] == expected
+
+
+def test_undeclared_source_falls_back_to_the_global_floor(guard):
+    settings = dict(guard.DEFAULTS, source_min_intervals={"custom": 42.0})
+    assert guard._source_interval("custom", settings) == 42.0
+    assert guard._source_interval("unknown-source", settings) == guard.DEFAULTS["min_fetch_interval_s"]
+
+
+def test_concurrent_provider_ids_share_one_source_read(guard, tmp_path, monkeypatch):
+    """Any number of concurrent sessions on one provider collapse into one read."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reads = []
+    barrier = threading.Barrier(6)
+
+    def spy(source_key, fetcher, sync_timeout_s=0.0, min_interval_s=0.0):
+        reads.append(source_key)
+        now = guard._now_utc().isoformat()
+        guard._merge_into_cache(source_key, {"ok": True, "windows": [], "fetched_at": now,
+                                             "polled_at": now, "last_attempt_at": now})
+
+    def worker():
+        barrier.wait(timeout=5)
+        guard._spawn_poll_for_source(
+            "anthropic", sync_timeout_s=1.0,
+            min_interval_s=guard._source_interval("anthropic", guard.DEFAULTS))
+
+    with patch.object(guard, "_spawn_poll", spy):
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+    assert reads == ["anthropic"]
+
+
+def test_malformed_source_min_intervals_deny(guard):
+    out, calls = invoke(guard, make_record(10), source_min_intervals={"anthropic": -5})
+    assert calls == []
+    assert out.usage_guard_blocked is True
 
 
 def test_no_other_plugin_is_used_as_a_usage_source(guard):

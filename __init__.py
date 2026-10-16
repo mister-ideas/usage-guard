@@ -64,10 +64,33 @@ DEFAULT_SOURCE_SCALES: dict[str, str] = {
     "openrouter": "percent",
 }
 
+# data-source key -> smallest safe interval between two network reads, in
+# seconds. The providers differ by orders of magnitude, so one global floor
+# either starves the freshest source or hammers the most sensitive one:
+#
+#   anthropic      The OAuth usage endpoint has a small hourly budget per
+#                  account that Claude Code itself and every other usage tool
+#                  on the machine draw from. Pollers reading it every 30-60s
+#                  are documented to hit a persistent 429 loop (and to starve
+#                  Claude Code's own usage panel), so ~3 minutes is the
+#                  smallest cadence that keeps working.
+#   openai-codex   Same class of undocumented backend usage budget; the Codex
+#                  TUI's own poller is known to hit 429 there.
+#   openrouter     Publishes its limits (20 requests/minute on the free tier,
+#                  scaling with credit balance) and tolerates far more.
+#
+# A source that is not declared here falls back to ``min_fetch_interval_s``.
+DEFAULT_SOURCE_MIN_INTERVALS: dict[str, float] = {
+    "anthropic": 180.0,
+    "openai-codex": 180.0,
+    "openrouter": 30.0,
+}
+
 DEFAULTS: dict[str, Any] = {
     "provider_keys": list(DEFAULT_PROVIDER_KEYS),
     "provider_sources": dict(DEFAULT_PROVIDER_SOURCES),
     "source_scales": dict(DEFAULT_SOURCE_SCALES),
+    "source_min_intervals": dict(DEFAULT_SOURCE_MIN_INTERVALS),
     # Deny when ANY window's used_percent >= threshold (100 = fully used).
     # 100 = the only blocking point is the subscription limit itself (0% left);
     # extra usage may stay enabled on the accounts.
@@ -632,6 +655,34 @@ def _clean_scales(value: Any) -> Optional[dict[str, str]]:
     return scales
 
 
+def _clean_intervals(value: Any) -> Optional[dict[str, float]]:
+    """Validate ``source_min_intervals``: data-source key -> seconds (>= 0)."""
+    if not isinstance(value, dict):
+        return None
+    intervals: dict[str, float] = {}
+    for key, seconds in value.items():
+        if not isinstance(key, str) or not key:
+            return None
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return None
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+        intervals[key] = float(seconds)
+    return intervals
+
+
+def _source_interval(source_key: str, settings: dict[str, Any]) -> float:
+    """The hard floor between two reads of this source, in seconds.
+
+    Providers differ by orders of magnitude, so the declared per-source value
+    wins and an undeclared source falls back to the global floor.
+    """
+    declared = settings.get("source_min_intervals") or {}
+    if source_key in declared:
+        return float(declared[source_key])
+    return float(settings["min_fetch_interval_s"])
+
+
 def _threshold(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -713,6 +764,14 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
             LOG.warning("usage-guard: malformed min_fetch_interval_s; using default")
         else:
             settings["min_fetch_interval_s"] = min_interval
+
+        raw_intervals = get_config("source_min_intervals", DEFAULT_SOURCE_MIN_INTERVALS)
+        intervals = _clean_intervals(raw_intervals)
+        if intervals is None:
+            config_ok = False
+            LOG.warning("usage-guard: malformed source_min_intervals %r; using default", raw_intervals)
+        else:
+            settings["source_min_intervals"] = intervals
 
         fail_open = get_config("fail_open", DEFAULTS["fail_open"])
         if not isinstance(fail_open, bool):
@@ -847,7 +906,7 @@ def _decide_provider(
             _spawn_poll_for_source(
                 source_key,
                 sync_timeout_s=settings["poll_wait_timeout_s"],
-                min_interval_s=settings["min_fetch_interval_s"],
+                min_interval_s=_source_interval(source_key, settings),
             )
             refreshed = _read_cache().get("providers", {}).get(source_key)
             if isinstance(refreshed, dict):

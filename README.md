@@ -81,6 +81,19 @@ A usage endpoint that rate-limits or fails must not become a refusal, because th
 - **A backoff never refuses a request by itself.** While the endpoint is rate-limiting, the guard keeps deciding on the last snapshot it read for up to `stale_grace_s` (default 900s), and the exhaustion interlock applies to that snapshot unchanged — a genuinely exhausted window still blocks. Beyond the grace window, the normal stale-data policy applies.
 - **The request rate is capped.** `min_fetch_interval_s` (default 30s) is a hard floor between two network reads of one source, enforced across processes through the cache, so a burst of guarded ingresses (main turn, auxiliary calls, MoA slots, subagents) can never become a burst of endpoint requests. Backoff honours `Retry-After`, grows exponentially with consecutive failures, and carries jitter so the desktop backend and the gateway do not retry in lockstep.
 
+## Refresh cadence per provider
+
+Providers differ by orders of magnitude, so the floor between two reads is declared per source (`source_min_intervals`). The effective cadence is `max(max_cache_age_s, that floor)`, and the floor is claimed atomically under the cache's file lock — so any number of concurrent sessions, in one process or several, share **one read per interval per source**.
+
+| Source | Smallest safe interval | Why |
+|---|---|---|
+| `anthropic` | **180s** | The OAuth usage endpoint has a small hourly budget per account that Claude Code itself and every other usage tool on the machine draw from. Pollers reading it every 30-60s are documented to hit a persistent 429 loop — and to starve Claude Code's own usage panel. |
+| `openai-codex` | **180s** | Same class of undocumented backend budget; the Codex TUI's own poller is known to hit 429 there. |
+| `openrouter` | **30s** | Publishes its limits (20 requests/minute on the free tier, scaling with credit balance). |
+| anything else | `min_fetch_interval_s` (30s) | Undeclared sources fall back to the global floor. |
+
+Lowering a floor below these values is allowed but self-defeating: the endpoint answers with a 429, the guard backs off exponentially (up to 15 minutes) and serves the last good snapshot, so the *effective* refresh rate ends up worse than the floor would have given. Several concurrent sessions never multiply the request rate — they share the cache and the atomic claim.
+
 ## Configuration
 
 Use Hermes' supported settings CLI/UI. Keys are under `plugins.entries.usage-guard.settings`:
