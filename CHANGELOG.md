@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 — 2026-10-16
+
+Catalog-compliance release: the guard now reaches Hermes only through documented surfaces.
+
+### Guard behavior
+
+- **The direct Anthropic usage read is removed.** The plugin no longer resolves a subscription token, no longer sends a request with a vendor client's user agent, and no longer talks to a usage endpoint itself. Every source, Anthropic included, goes through the documented `agent.account_usage.fetch_account_usage`, which resolves the provider's stored sign-in and attaches it — so no credential ever reaches plugin code (catalog rule 11).
+- **The MoA preset resolver is local.** The guard no longer imports the core's private `hermes_cli.moa_config`; it validates the `moa` config itself from the host's documented semantics, and a host-contract test asserts it agrees with the core on a real sample (catalog rule 9).
+- **Consequence, stated plainly:** upstream's Anthropic parser multiplies any `utilization` <= 1 by 100 while that payload's values are percentages, so a sub-1% window arrives inflated and the guard cannot repair it from the public API. At `threshold_percent=100`, a session reported as exactly 1% reads as 100% and blocks. Fixing it belongs upstream, not in a plugin.
+- `requires_hermes` is now `>=0.21.6`: the first stable release that ships the `llm_execution` middleware, `fetch_account_usage` and its documented `read_only` argument.
+
 ## 0.1.5 — 2026-10-16
 
 Refresh cadence is per provider, at the smallest safe interval each one allows.
