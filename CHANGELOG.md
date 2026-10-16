@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 — 2026-10-16
+
+Fix a false "exhausted" reading on the Anthropic source — affecting every provider mapped to it (`anthropic`, `claude-subscription-directsdk-experimental`, and any user-mapped alias).
+
+### Guard behavior
+
+- The host's Anthropic fetcher parses the OAuth usage payload with a fraction heuristic that multiplies any `utilization` ≤ 1 by 100. That payload is a percentage scale — its own `limits[]` array reports the same windows as `percent` (session 4, weekly_all 1) — so a healthy 1% week arrived as 100% and the guard refused a healthy account. The plugin now reads the Anthropic payload itself and never scales these values: a 1% week stays 1%.
+- Reading the payload directly also brings the full published window set into the gate on stock Hermes: the classic session/weekly windows, the model-scoped weeks, and every `limits[]` entry. Previously only the host's classic windows were visible, because the host attaches no raw payload for Anthropic.
+- Transport failures on that read keep the existing fail-closed policy: an HTTP 429 records a bounded backoff and the guard denies until it expires — never on stale evidence.
+
 ## 0.1.0 — 2026-10-06
 
 First release. The guard blocks provider calls exactly when a subscription usage window reaches `threshold_percent` (default 100 = 0% left) on fresh, confirmed evidence — and never otherwise. Earlier 0.x numbers were internal development builds and were never released.
