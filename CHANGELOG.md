@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6 — 2026-10-16
+
+Fix a trailing blank line in `CODE_OF_CONDUCT.md` that failed the CI whitespace check on 0.2.5. Documentation only.
+
 ## 0.2.5 — 2026-10-16
 
 Open-source readiness: a Contributor Covenant code of conduct, a feature-request form, issue-template configuration (blank issues off, with pointers to private security reporting and Discussions), Dependabot for the workflow actions, README badges, and a CONTRIBUTING guide that documents scope, the pull-request process and the release policy. No plugin code changed.
