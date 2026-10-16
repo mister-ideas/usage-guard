@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-10-16
+
+Portability release: two assumptions about the author's own setup are gone, so the guard behaves correctly on a machine that is not a Claude-subscription desktop.
+
+### Guard behavior
+
+- **A provider whose account has no subscription usage to read is no longer refused.** Hermes's Anthropic fetcher reports a deliberate reason for an API-key account (the OAuth usage endpoint publishes no limits for it). That reason is not one of this plugin's own failure reasons, and with no windows to evaluate the guard used to deny every request for that provider — blocking a healthy account it has no business gating. Such a source now passes, with one warning naming it; the plugin's own reasons (`fetch-error`, `no-data`, the `malformed-*` set) keep the fail-closed policy.
+- **State lives in the documented per-plugin data dir.** The cache path is resolved through `plugins.plugin_storage.plugin_data_dir`, which follows the active profile (context override → `HERMES_HOME` → platform default) instead of reading `HERMES_HOME` and falling back to `~/.hermes`. Two profiles on one machine keep separate usage evidence. A Hermes without that helper still resolves the same layout by hand.
+
 ## 0.2.0 — 2026-10-16
 
 Catalog-compliance release: the guard now reaches Hermes only through documented surfaces.
@@ -59,7 +68,7 @@ Full scale pass over every usage value the guard ingests, and an explicit statem
 
 ## 0.1.1 — 2026-10-16
 
-Fix a false "exhausted" reading on the Anthropic source — affecting every provider mapped to it (`anthropic`, `claude-subscription-directsdk-experimental`, and any user-mapped alias).
+Fix a false "exhausted" reading on the Anthropic source — affecting every provider mapped to it (`anthropic` and any user-mapped alias, such as a provider plugin whose id points at the same account).
 
 ### Guard behavior
 

@@ -218,11 +218,22 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 
 
 def _cache_path() -> str:
-    """$HERMES_HOME/plugin-data/usage-guard/usage.json (HERMES_HOME honored)."""
-    home = os.environ.get("HERMES_HOME", "").strip() or os.path.join(
-        os.path.expanduser("~"), ".hermes"
-    )
-    return os.path.join(home, "plugin-data", _CACHE_DIRNAME, _CACHE_FILENAME)
+    """The guard's cache file: its own plugin data dir, which follows the profile.
+
+    ``plugin_data_dir`` resolves the active Hermes home per call (context
+    override, then ``HERMES_HOME``, then the platform default), so two profiles
+    sharing a machine keep separate usage evidence. The hand-rolled path below
+    is the same layout for a Hermes that predates that helper.
+    """
+    try:
+        from plugins.plugin_storage import plugin_data_dir
+
+        return str(plugin_data_dir(_CACHE_DIRNAME) / _CACHE_FILENAME)
+    except Exception:
+        home = os.environ.get("HERMES_HOME", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".hermes"
+        )
+        return os.path.join(home, "plugin-data", _CACHE_DIRNAME, _CACHE_FILENAME)
 
 
 def _read_cache(path: Optional[str] = None) -> dict[str, Any]:
@@ -804,6 +815,20 @@ _undeclared_source_lock = threading.Lock()
 _undeclared_sources_warned: set[str] = set()
 
 
+# Every ``unavailable_reason`` this plugin writes itself. A reason outside this
+# set came from the core's own fetcher, which reports it deliberately — the
+# account has no subscription usage surface (an Anthropic API-key account, whose
+# limits the OAuth usage endpoint does not publish). See ``_decide_provider``.
+_OWN_UNAVAILABLE_REASONS = frozenset({
+    "fetch-error", "no-data", "no-usable-windows",
+    "malformed-snapshot", "malformed-raw-usage", "malformed-raw-window",
+    "malformed-raw-reset", "malformed-limits", "malformed-limit",
+    "malformed-limit-reset", "malformed-codex-limit", "malformed-codex-limit-flag",
+    "malformed-codex-window", "malformed-codex-reset",
+    "malformed-codex-additional-limits",
+})
+
+
 def _warn_undeclared_source_once(source_key: str, record: Any) -> None:
     """Flag an unclassified source whose values look like fractions (0-1).
 
@@ -834,6 +859,26 @@ def _warn_undeclared_source_once(source_key: str, record: Any) -> None:
         "they are read as percentages (1.0 = 1%% used). If this source reports fractions, "
         "declare it in source_scales as 'fraction'.",
         source_key,
+    )
+
+
+_no_usage_surface_warned: set[str] = set()
+
+
+def _warn_no_usage_surface_once(source_key: str, reason: str) -> None:
+    """Name a source the core reports as having no account-usage surface, once.
+
+    The guard gates subscription usage; a provider whose account has none (an
+    Anthropic API-key account) is passed through rather than refused, so the user
+    is told why it is not being guarded instead of being blocked.
+    """
+    if source_key in _no_usage_surface_warned:
+        return
+    _no_usage_surface_warned.add(source_key)
+    LOG.warning(
+        "usage-guard: source %s reports no account usage to guard (%s); requests for its "
+        "providers are not gated. Remove the provider from provider_keys to silence this.",
+        source_key, reason,
     )
 
 
@@ -925,6 +970,18 @@ def _decide_provider(
 
     if stale_usable and not _fresh(record, settings["max_cache_age_s"], _now_utc()):
         _warn_stale_evidence_once(source_key, evidence_age or 0.0)
+
+    # A source the core reports as having no usage surface (a reason this plugin
+    # did not write, and no windows) has no subscription usage to guard: an
+    # Anthropic API-key account publishes no limits on the OAuth usage endpoint.
+    # Refusing there would block a healthy account the guard has no business
+    # gating, so the provider passes and the source is named once. This plugin's
+    # own failure and malformed-snapshot reasons keep the policy below.
+    record_reason = str((record or {}).get("unavailable_reason") or "")
+    if (record_reason and not (record or {}).get("windows")
+            and record_reason not in _OWN_UNAVAILABLE_REASONS):
+        _warn_no_usage_surface_once(source_key, record_reason)
+        return _Decision(True, reason=f"no account usage surface ({record_reason})")
 
     # The latest read failed and left no windows to evaluate: there is nothing
     # to decide on, so the unavailable policy applies (fail_open honored).

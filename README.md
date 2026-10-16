@@ -138,6 +138,8 @@ The account-usage data comes from core's documented `agent.account_usage.fetch_a
 - Credential binding: the `llm_execution` middleware payload does not attest which credential/account a request will use, so the guard polls the account the core resolver returns and cannot prove it matches the request. With credential pools or per-session overrides, treat the reading as account-level evidence, not request-level.
 - Anthropic windows on stock Hermes: upstream's parser scales any `utilization` ≤ 1 by 100 while the payload is a percentage scale, so a sub-1% window arrives inflated (see the caveat above). The guard reads what the core reports and cannot repair it through the public API.
 - Not a billing guarantee: the plugin cannot revoke in-flight requests, govern other applications or direct CLI launches, enforce policy while unloaded, or predict the next request's cost from a quota percentage. Native list-price equivalent estimates are not actual subscription overage.
+- No usage surface: a provider whose account has no subscription usage to read — an Anthropic API-key account, whose limits the OAuth usage endpoint does not publish — is passed through with one warning naming the source, rather than refused. The guard's own failure reasons (`fetch-error`, `no-data`, the `malformed-*` set) keep the fail-closed policy.
+- Durable state: the cache is `<data dir>/usage-guard/usage.json` in the per-plugin data root that Hermes resolves for the active profile, so profiles on one machine do not share usage evidence. It holds windows, timestamps, plan and failure reasons only — never credentials or raw payloads.
 
 ## Development
 
