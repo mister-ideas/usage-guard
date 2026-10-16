@@ -4,7 +4,7 @@ Author: **mister-ideas**. MIT-licensed Hermes native plugin.
 
 ## Policy
 
-Registers `llm_execution` middleware, with an independent cache over `agent.account_usage.fetch_account_usage`. It never imports the quota plugin.
+Registers `llm_execution` middleware, with an independent cache over `agent.account_usage.fetch_account_usage`. It depends on nothing beyond Hermes itself.
 
 **The only blocking point is a subscription usage window at/over the threshold.** With `threshold_percent=100`, requests pass while any subscription allowance remains (0% left = blocked) and are denied the moment a window is fully used. No account-level extra-usage or credit state is read or enforced; the plugin never touches account or billing settings. MoA turns are gated through the running preset: every enabled reference slot and the aggregator whose provider is in `provider_keys` is checked, and the turn is refused when any of them is exhausted.
 
@@ -69,7 +69,7 @@ On Hermes builds that route auxiliary attempts through the middleware (a host-si
 
 ## Usage sources and scale
 
-**Sources.** Every usage number comes from Hermes itself, through the documented `agent.account_usage.fetch_account_usage`, for every source including Anthropic. The core fetcher resolves each provider's stored sign-in and attaches it, so the plugin never holds a credential and never calls a usage endpoint itself. No other plugin is imported, read or required (notably not `quota`); the guard's only cache is its own under `$HERMES_HOME/plugin-data/usage-guard/`.
+**Sources.** Every usage number comes from Hermes itself, through the documented `agent.account_usage.fetch_account_usage`, for every source including Anthropic. The core fetcher resolves each provider's stored sign-in and attaches it, so the plugin never holds a credential and never calls a usage endpoint itself. Nothing outside Hermes is imported, read or required; the guard's only cache is its own, in the plugin data dir that Hermes resolves for the active profile.
 
 **Anthropic caveat.** Upstream's Anthropic fetcher parses the OAuth usage payload with `fraction=True`, which multiplies any `utilization` ≤ 1 by 100 — and that payload's `utilization` is a percentage scale (its own `limits[]` reports the same windows as `percent`). A healthy sub-1% window therefore arrives inflated, and the guard can only report what the core reports: at `threshold_percent=100` a session reading exactly 1% becomes 100% and blocks. Repairing that belongs upstream; a plugin that read the endpoint itself would have to hold the user's token, which the catalog forbids. Whenever the host does provide a raw payload, the guard ingests every published window at its stated percentage.
 
