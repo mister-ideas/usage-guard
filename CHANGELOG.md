@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.8 — 2026-10-16
+
+README pass, compared against the most-starred Hermes plugin READMEs. Adds a Requirements line, a "What happens on first install" section and a Troubleshooting table; moves Install up to the top. Fixes two wrong claims: the install command (`hermes plugins install` takes a catalog name, a Git URL or `owner/repo` — not a filesystem path) and the MoA resolver (the guard resolves the running preset itself and no longer imports core's normalizer). Documentation only.
+
 ## 0.2.7 — 2026-10-16
 
 Say why the plugin exists. The README gains a "Why this exists" section and the catalog entry's description leads with the purpose — keeping an agent inside the subscription allowance on an account that allows paid extra usage — instead of only describing the mechanism. Documentation only.
