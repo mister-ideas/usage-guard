@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4 — 2026-10-16
+
+Per-request refresh is gone; refreshes are rate-budgeted and shared.
+
+### Guard behavior
+
+- **`refresh_every_request` is removed.** Reading the usage endpoint on every guarded ingress is what caused the 429s: several ingresses (main turn, auxiliary calls, MoA slots, subagents) each produced a request. Refresh is now driven purely by a freshness TTL (`max_cache_age_s`, default 60s), bounded by `min_fetch_interval_s` (default 30s) and any rate-limit backoff.
+- **Concurrent requests share one read.** The right to read a source is claimed atomically under the cache's advisory file lock, so X guarded requests at the same moment — several threads, or the desktop backend and the gateway sharing `HERMES_HOME` — collapse into a single usage-endpoint request per interval. Callers that lose the claim wait (bounded by `poll_wait_timeout_s`) for the winner's result instead of deciding on a stale record.
+- **A read that could not land no longer refuses.** With the per-request confirmation check gone, the decision rests on the kept windows within `stale_grace_s`, exactly as a rate-limited read does.
+
 ## 0.1.3 — 2026-10-16
 
 Rate limiting no longer refuses requests.

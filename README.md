@@ -14,7 +14,7 @@ Defaults: guard `anthropic` and `openai-codex` (stock providers); refresh at eve
 
 Usage limits are pulled as often as needed so decisions never rely on late information:
 
-- `refresh_every_request=true` (default) fetches a new usage snapshot at every guarded ingress; a refresh that cannot be confirmed denies even if an older snapshot is still recent.
+- The endpoint is read on a freshness TTL (`max_cache_age_s`), never per request: every guarded ingress shares one cache, and concurrent ones collapse into a single read.
 - On the stale path the guard waits up to `poll_wait_timeout_s` for a synchronous refresh before deciding; stale/missing/malformed evidence denies (`fail_open=false`). With the usage endpoint unresponsive, a guarded call can stall up to this long before denying.
 - Simultaneous refreshes for the same provider are coalesced (one in-flight poll; waiters share its result).
 - If the usage endpoint answers HTTP 429, the guard records a bounded backoff (`Retry-After`, capped at 10 minutes) and denies with a clear notice until it expires — stale evidence is never reused to allow a call.
@@ -92,7 +92,6 @@ Use Hermes' supported settings CLI/UI. Keys are under `plugins.entries.usage-gua
 | `threshold_percent` | `100.0` | Block when ANY window's used_percent >= this value (default blocks only at 0% left) |
 | `max_cache_age_s` | `60.0` | Maximum snapshot age |
 | `poll_wait_timeout_s` | `20.0` | Bounded refresh wait on the stale path |
-| `refresh_every_request` | `true` | Require new evidence per guarded ingress |
 | `fail_open` | `false` | Keep false for safety |
 | `source_scales` | `{"anthropic": "percent", "openai-codex": "percent", "openrouter": "percent"}` | data-source key → value scale: `percent` (0-100) or `fraction` (0-1, scaled ×100 at decision time) |
 | `stale_grace_s` | `900` | While a refresh is failing or rate-limited, keep deciding on the last good snapshot for up to this long instead of refusing. `0` restores the strict stale policy |

@@ -19,7 +19,7 @@ def rec(**extra):
 
 
 def invoke(guard, record, provider="anthropic", **settings):
-    policy = dict(guard.DEFAULTS, refresh_every_request=False)
+    policy = dict(guard.DEFAULTS)
     policy.update(settings)
     calls = []
     with patch.object(guard, "_read_cache", return_value={"providers": {provider: record}}), \
@@ -137,34 +137,34 @@ def test_expired_backoff_allows(guard):
     assert calls == [{}]
 
 
-# ── m4: refresh confirmation via polled_at, not fetched_at equality ──────────
+# ── refresh policy: TTL-driven; a failed read never refuses on its own ───────
 
-def test_new_polled_at_confirms_refresh_even_with_same_fetched_at(guard):
-    """Poll lands within the same second → same fetched_at, new polled_at:
-    the refresh IS confirmed and the request must pass."""
-    old = (NOW - timedelta(seconds=30)).isoformat()
-    record = rec(fetched_at=old, polled_at=old)
-    landed = rec(fetched_at=old, polled_at=(NOW + timedelta(milliseconds=5)).isoformat())
-    policy = dict(guard.DEFAULTS, refresh_every_request=True)
+def test_ttl_controls_refresh_not_the_request(guard):
+    """A fresh record is not re-read; a record past the TTL is."""
+    policy = dict(guard.DEFAULTS, max_cache_age_s=60)
+    for fetched, expected in ((NOW, []), (NOW - timedelta(seconds=300), ["anthropic"])):
+        spawned = []
+        record = rec(fetched_at=fetched.isoformat(), polled_at=fetched.isoformat())
+        with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": record}}), \
+             patch.object(guard, "_spawn_poll_for_source",
+                          side_effect=lambda *a, _sink=spawned, **k: _sink.append(a)):
+            guard.gate_llm_execution(
+                lambda k, d: policy.get(k, d), provider="anthropic", model="offline",
+                api_mode="chat_completions", request={}, next_call=lambda r: None)
+        assert [call[0] for call in spawned] == expected
+
+
+def test_failed_refresh_keeps_deciding_on_the_last_windows(guard):
+    """The read failed: the kept windows decide, so the request is not refused."""
+    stale = rec(fetched_at=(NOW - timedelta(seconds=300)).isoformat(),
+                polled_at=(NOW - timedelta(seconds=300)).isoformat())
+    failed = {**stale, "ok": False, "unavailable_reason": "fetch-error"}
+    policy = dict(guard.DEFAULTS)
     calls = []
     with patch.object(guard, "_read_cache", side_effect=[
-            {"providers": {"anthropic": record}}, {"providers": {"anthropic": landed}}]), \
+            {"providers": {"anthropic": stale}}, {"providers": {"anthropic": failed}}]), \
          patch.object(guard, "_spawn_poll_for_source"):
         guard.gate_llm_execution(
             lambda k, d: policy.get(k, d), provider="anthropic", model="offline",
             api_mode="chat_completions", request={}, next_call=calls.append)
     assert calls == [{}]
-
-
-def test_unchanged_polled_at_denies(guard):
-    old = (NOW - timedelta(seconds=30)).isoformat()
-    record = rec(fetched_at=old, polled_at=old)
-    policy = dict(guard.DEFAULTS, refresh_every_request=True)
-    calls = []
-    with patch.object(guard, "_read_cache", side_effect=[
-            {"providers": {"anthropic": record}}, {"providers": {"anthropic": record}}]), \
-         patch.object(guard, "_spawn_poll_for_source"):
-        guard.gate_llm_execution(
-            lambda k, d: policy.get(k, d), provider="anthropic", model="offline",
-            api_mode="chat_completions", request={}, next_call=calls.append)
-    assert calls == []
