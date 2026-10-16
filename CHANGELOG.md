@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3 — 2026-10-16
+
+Repository hygiene only: `plugin-data/` joins the other cache directories in `.gitignore`, so running the plugin with `HERMES_HOME` pointed at a clone cannot leave an untracked cache directory. No plugin code changed.
+
 ## 0.2.2 — 2026-10-16
 
 Repository hygiene only: `.ruff_cache/` joins the other cache directories in `.gitignore`, so a local lint run cannot leave an untracked directory in a clone. No plugin code changed.
