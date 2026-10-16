@@ -1,6 +1,7 @@
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+plugin-data/
 *.py[cod]
 .DS_Store
 .venv/
