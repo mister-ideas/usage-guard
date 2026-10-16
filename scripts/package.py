@@ -8,7 +8,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 root = Path(__file__).resolve().parents[1]
 version = next(
     line.split(":", 1)[1].strip().strip('"')
-    for line in (root / "plugin.yaml").read_text().splitlines()
+    for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines()
     if line.startswith("version:")
 )
 out = root / "dist"
