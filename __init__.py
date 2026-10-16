@@ -67,7 +67,10 @@ DEFAULTS: dict[str, Any] = {
     # 100 = the only blocking point is the subscription limit itself (0% left);
     # extra usage may stay enabled on the accounts.
     "threshold_percent": 100.0,
-    # Snapshots older than this are stale (see module policy).
+    # Freshness target: evidence older than this triggers a refresh, subject to
+    # min_fetch_interval_s (the hard rate cap) and any rate-limit backoff. There
+    # is no per-request refresh mode: every guarded ingress shares one cache and
+    # concurrent ones collapse into a single network read per interval.
     "max_cache_age_s": 60.0,
     # While a refresh is failing or rate-limited, the last good snapshot stays
     # usable for up to this long instead of refusing the request. 0 disables it
@@ -83,7 +86,6 @@ DEFAULTS: dict[str, Any] = {
     "min_fetch_interval_s": 30.0,
     # False: deny on stale/missing/unavailable data (recommended). True: allow.
     "fail_open": False,
-    "refresh_every_request": True,
 }
 
 _NOTICE_HEADER = (
@@ -707,13 +709,6 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         else:
             settings["min_fetch_interval_s"] = min_interval
 
-        for key in ("refresh_every_request",):
-            value = get_config(key, DEFAULTS[key])
-            if not isinstance(value, bool):
-                config_ok = False
-            else:
-                settings[key] = value
-
         fail_open = get_config("fail_open", DEFAULTS["fail_open"])
         if not isinstance(fail_open, bool):
             config_ok = False
@@ -838,36 +833,32 @@ def _decide_provider(
         and (backing_off or last_read_failed)
     )
 
-    if not backing_off and (
-        settings.get("refresh_every_request", True) or not _fresh(record, settings["max_cache_age_s"], now)
-    ):
-        previous_fetched = (record or {}).get("fetched_at")
-        previous_polled = (record or {}).get("polled_at")
+    if not backing_off and not _fresh(record, settings["max_cache_age_s"], now):
         if spawn_poll:
             # Refresh bounded-synchronously so the decision uses fresh data
             # instead of denying the first request after the cache ages out.
-            # A poll for this source may already be in flight from another
-            # request — the call below waits for that one to land, and the
-            # min-interval floor caps how often the endpoint is read at all.
+            # Concurrent callers — same process or another — share this one
+            # read: the claim below is atomic and the others wait for it.
             _spawn_poll_for_source(
                 source_key,
                 sync_timeout_s=settings["poll_wait_timeout_s"],
                 min_interval_s=settings["min_fetch_interval_s"],
             )
             refreshed = _read_cache().get("providers", {}).get(source_key)
-            if isinstance(refreshed, dict) and _fresh(
-                refreshed, settings["max_cache_age_s"], _now_utc()
-            ):
+            if isinstance(refreshed, dict):
                 record = refreshed
-        if not stale_usable and settings.get("refresh_every_request", True) and (
-            (record or {}).get("fetched_at") == previous_fetched
-            and (record or {}).get("polled_at") == previous_polled
-        ):
-            # m4: confirmation is (fetched_at, polled_at) — polled_at is
-            # stamped by the poller on every completed fetch, including one
-            # landing within the same second as the previous fetch. A refresh
-            # that could not land only refuses when no usable evidence remains.
-            return _Decision(False, "Usage guard: a new usage snapshot could not be verified; the request was not sent.", "refresh not confirmed")
+        # Re-evaluate on the record the refresh produced: a read that failed
+        # marks the record and keeps its windows, and those windows are what
+        # decides — so a refresh that could not land never refuses on its own.
+        backoff_until = _parse_ts(record.get("backoff_until")) if isinstance(record, dict) else None
+        backing_off = backoff_until is not None and backoff_until > now
+        evidence_age = _evidence_age_s(record, now)
+        last_read_failed = bool((record or {}).get("unavailable_reason"))
+        stale_usable = (
+            evidence_age is not None
+            and evidence_age <= settings["stale_grace_s"]
+            and (backing_off or last_read_failed)
+        )
 
     if not _fresh(record, settings["max_cache_age_s"], _now_utc()) and not stale_usable:
         reason = (
@@ -1042,16 +1033,88 @@ def _anthropic_snapshot() -> Any:
     return _snapshot_like(raw=payload) if isinstance(payload, dict) else None
 
 
+def _claim_fetch_slot(source_key: str, min_interval_s: float) -> bool:
+    """Atomically claim the right to read this source's usage.
+
+    The claim is read and written under the cache's advisory file lock, so N
+    concurrent guarded ingresses — several threads in one process, or the desktop
+    backend and the gateway sharing HERMES_HOME — collapse into one request to
+    the usage endpoint per interval instead of N. The claim is stamped before the
+    fetch starts, so a second caller can tell a read is in flight (see
+    ``_await_inflight``). Returns True when the caller may fetch.
+    """
+    if min_interval_s <= 0.0:
+        return True
+    full = _cache_path()
+    now = _now_utc()
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with _cache_thread_lock, _locked(full):
+        try:
+            with open(full, "r", encoding="utf-8") as fh:
+                disk = json.load(fh)
+            if not isinstance(disk, dict):
+                disk = {}
+        except FileNotFoundError:
+            disk = {}
+        except Exception:
+            LOG.debug("usage-guard cache read during claim failed", exc_info=True)
+            disk = {}
+        providers = disk.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+        record = providers.get(source_key)
+        last_attempt = _parse_ts(record.get("last_attempt_at")) if isinstance(record, dict) else None
+        if last_attempt is not None:
+            try:
+                if (now - last_attempt).total_seconds() < min_interval_s:
+                    return False
+            except OverflowError:
+                pass
+        providers[source_key] = {**(record if isinstance(record, dict) else {}),
+                                 "last_attempt_at": now.isoformat()}
+        disk["providers"] = providers
+        disk["schema"] = 1
+        tmp = f"{full}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(disk, fh, sort_keys=True)
+        os.replace(tmp, full)
+    return True
+
+
+def _await_inflight(source_key: str, timeout_s: float) -> None:
+    """Wait (bounded) for an in-flight read of this source to record its result.
+
+    ``last_attempt_at`` is stamped when a read starts and ``polled_at`` when one
+    finishes, so ``last_attempt_at > polled_at`` means a read is running — in
+    another thread or another process. Waiting for it lets a concurrent caller
+    decide on that result instead of refusing on the stale record. When the floor
+    (not an in-flight read) is what refused the claim, this returns at once.
+    """
+    if timeout_s <= 0.0:
+        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        record = _read_cache().get("providers", {}).get(source_key)
+        if not isinstance(record, dict):
+            return
+        attempt = _parse_ts(record.get("last_attempt_at"))
+        polled = _parse_ts(record.get("polled_at"))
+        if attempt is None or polled is None or attempt <= polled:
+            return
+        time.sleep(0.1)
+
+
 def _spawn_poll_for_source(
     source_key: str, sync_timeout_s: float = 0.0, min_interval_s: float = 0.0
 ) -> None:
     """Best-effort: start one bounded fetch of the source's usage.
 
-    ``min_interval_s`` > 0 enforces a hard floor between network reads of this
-    source across processes (the last attempt is recorded in the cache), so a
-    burst of guarded ingresses can never become a burst of usage-endpoint
-    requests. The endpoint's own rate limit is what makes it stop answering,
-    which is the only reason the guard could not refresh.
+    ``min_interval_s`` > 0 is a hard floor between network reads of this source.
+    The slot is claimed atomically under the cache's file lock, so N concurrent
+    guarded ingresses — in this process or across the desktop backend and the
+    gateway sharing HERMES_HOME — collapse into a single request to the usage
+    endpoint. Callers that lose the claim wait (bounded) for the winner's result
+    rather than deciding on a stale record.
 
     The core import happens inside the worker thread — if the core module is
     absent the poll records ``fetch-error`` and the guard keeps its on-disk
@@ -1077,15 +1140,13 @@ def _spawn_poll_for_source(
 
         return core_fetch(source_key)
 
-    if min_interval_s > 0.0:
-        existing = _read_cache().get("providers", {}).get(source_key)
-        last_attempt = _parse_ts(existing.get("last_attempt_at")) if isinstance(existing, dict) else None
-        if last_attempt is not None:
-            try:
-                if (_now_utc() - last_attempt).total_seconds() < min_interval_s:
-                    return
-            except OverflowError:
-                pass
+    if not _claim_fetch_slot(source_key, min_interval_s):
+        # A read of this source is already in flight (this process or another
+        # sharing HERMES_HOME), or the interval floor is still in force. Wait
+        # only while one is genuinely running, so the decision can use its
+        # result instead of refusing on the stale record.
+        _await_inflight(source_key, sync_timeout_s)
+        return
 
     _spawn_poll(source_key, _fetch, sync_timeout_s=sync_timeout_s)
 

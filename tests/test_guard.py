@@ -6,6 +6,8 @@ behavior (agent.* imports, auxiliary middleware) lives in test_host_contract.py
 and skips when the Hermes tree is not importable.
 """
 import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -34,7 +36,7 @@ def snapshot_like(raw=None, used=10, plan=None):
 
 def invoke(guard, record, provider="anthropic", **settings):
     """Run one middleware gate with a hand-built cache record."""
-    policy = dict(guard.DEFAULTS, refresh_every_request=False)
+    policy = dict(guard.DEFAULTS)
     policy.update(settings)
     calls = []
     with patch.object(guard, "_read_cache", return_value={"providers": {provider: record}}), \
@@ -122,7 +124,7 @@ def test_stale_snapshot_denies_when_poll_times_out(guard):
          patch.object(guard, "_spawn_poll_for_source"):  # returns without writing
         calls = []
         guard.gate_llm_execution(
-            lambda key, default: dict(guard.DEFAULTS, refresh_every_request=False).get(key, default),
+            lambda key, default: dict(guard.DEFAULTS).get(key, default),
             provider="anthropic", model="offline", api_mode="chat_completions",
             request={}, next_call=lambda req: calls.append(req))
     assert calls == []
@@ -197,7 +199,7 @@ def test_downstream_error_propagates_after_dispatch(guard):
          patch.object(guard, "_spawn_poll_for_source"):
         with pytest.raises(RuntimeError, match="already dispatched"):
             guard.gate_llm_execution(
-                lambda key, default: dict(guard.DEFAULTS, refresh_every_request=False).get(key, default),
+                lambda key, default: dict(guard.DEFAULTS).get(key, default),
                 provider="anthropic", model="offline", api_mode="chat_completions",
                 request={}, next_call=failing)
     assert len(calls) == 1
@@ -242,12 +244,11 @@ def test_empty_provider_passes_through(guard):
 @pytest.mark.parametrize("key,value", [
     ("threshold_percent", 101), ("threshold_percent", -1), ("threshold_percent", "90"),
     ("max_cache_age_s", -5), ("poll_wait_timeout_s", "x"), ("fail_open", "yes"),
-    ("refresh_every_request", 1), ("provider_keys", "anthropic"),
+    ("provider_keys", "anthropic"),
     ("provider_sources", {"anthropic": 5}),
 ])
 def test_malformed_settings_deny(guard, key, value):
     settings = dict(guard.DEFAULTS)
-    settings["refresh_every_request"] = False
     settings[key] = value
     calls = []
     with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": make_record(10)}}), \
@@ -265,7 +266,7 @@ def test_stock_defaults_are_setup_agnostic(guard):
     assert guard.DEFAULTS["provider_sources"] == {"anthropic": "anthropic", "openai-codex": "openai-codex"}
     assert guard.DEFAULTS["threshold_percent"] == 100.0
     assert guard.DEFAULTS["fail_open"] is False
-    assert guard.DEFAULTS["refresh_every_request"] is True
+    assert "refresh_every_request" not in guard.DEFAULTS  # per-request refresh was removed
 
 
 # M4: lock deadline must be enforceable (LOCK_NB retry), never block forever.
@@ -339,7 +340,7 @@ def test_denied_path_invokes_next_call_never(guard):
     with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": make_record(100)}}), \
          patch.object(guard, "_spawn_poll_for_source"):
         guard.gate_llm_execution(
-            lambda k, d: dict(guard.DEFAULTS, refresh_every_request=False).get(k, d),
+            lambda k, d: dict(guard.DEFAULTS).get(k, d),
             provider="anthropic", model="m", api_mode="chat_completions",
             request={}, next_call=calls.append)
     assert calls == []
@@ -350,7 +351,7 @@ def test_allowed_path_invokes_next_call_exactly_once(guard):
     with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": make_record(10)}}), \
          patch.object(guard, "_spawn_poll_for_source"):
         guard.gate_llm_execution(
-            lambda k, d: dict(guard.DEFAULTS, refresh_every_request=False).get(k, d),
+            lambda k, d: dict(guard.DEFAULTS).get(k, d),
             provider="anthropic", model="m", api_mode="chat_completions",
             request={}, next_call=calls.append)
     assert len(calls) == 1
@@ -475,7 +476,7 @@ def test_moa_slot_providers_returns_none_when_unresolvable(guard):
 
 def invoke_moa(guard, records, providers, model="default", **settings):
     """Run one MoA gate with a hand-built per-provider cache and slot list."""
-    policy = dict(guard.DEFAULTS, refresh_every_request=False)
+    policy = dict(guard.DEFAULTS)
     policy.update(settings)
     calls = []
     with patch.object(guard, "_read_cache", return_value={"providers": records}), \
@@ -512,7 +513,7 @@ def test_moa_turn_denied_when_preset_is_unresolvable(guard):
          patch.object(guard, "_spawn_poll_for_source"), \
          patch.object(guard, "_moa_preset_slots", return_value=None):
         out = guard.gate_llm_execution(
-            lambda key, default: dict(guard.DEFAULTS, refresh_every_request=False).get(key, default),
+            lambda key, default: dict(guard.DEFAULTS).get(key, default),
             provider="moa", model="default", api_mode="chat_completions",
             request={}, next_call=lambda req: calls.append(req))
     assert calls == []
@@ -638,7 +639,7 @@ def test_other_sources_use_the_core_fetcher(guard):
 
 def invoke_source(guard, records, provider, **settings):
     """Run one gate with cache records keyed by SOURCE key."""
-    policy = dict(guard.DEFAULTS, refresh_every_request=False)
+    policy = dict(guard.DEFAULTS)
     policy.update(settings)
     calls = []
     with patch.object(guard, "_read_cache", return_value={"providers": records}), \
@@ -770,17 +771,80 @@ def test_backoff_respects_retry_after_and_grows_on_repeats(guard):
     assert grown["consecutive_failures"] == 4
 
 
-def test_min_fetch_interval_skips_a_repeat_read(guard):
+def _gate_with_spy(guard, record, **settings):
+    """Run one gate, recording every refresh attempt instead of polling."""
+    policy = dict(guard.DEFAULTS)
+    policy.update(settings)
+    spawned = []
     calls = []
-    recent = {"last_attempt_at": NOW.isoformat()}
-    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": recent}}), \
-         patch.object(guard, "_spawn_poll", side_effect=lambda *a, **k: calls.append(a)):
-        guard._spawn_poll_for_source("anthropic", min_interval_s=30.0)
-    assert calls == []
-    with patch.object(guard, "_read_cache", return_value={"providers": {}}), \
-         patch.object(guard, "_spawn_poll", side_effect=lambda *a, **k: calls.append(a)):
-        guard._spawn_poll_for_source("anthropic", min_interval_s=30.0)
-    assert len(calls) == 1
+    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": record}}), \
+         patch.object(guard, "_spawn_poll_for_source",
+                      side_effect=lambda *a, **k: spawned.append((a, k))):
+        out = guard.gate_llm_execution(
+            lambda key, default: policy.get(key, default),
+            provider="anthropic", model="offline", api_mode="chat_completions",
+            request={}, next_call=calls.append)
+    return out, calls, spawned
+
+
+def test_fresh_evidence_does_not_read_the_endpoint(guard):
+    """The TTL, not the request, decides when the endpoint is read."""
+    _, calls, spawned = _gate_with_spy(guard, make_record(10))
+    assert calls == [{}] and spawned == []
+
+
+def test_stale_evidence_triggers_one_read(guard):
+    _, _, spawned = _gate_with_spy(guard, _aged(300, used=10))
+    assert len(spawned) == 1
+
+
+def test_unconfirmed_refresh_still_decides_on_the_kept_windows(guard):
+    """A read that fails marks the record; its kept windows still decide."""
+    stale = _aged(300, used=10)
+    failed = {**stale, "ok": False, "unavailable_reason": "fetch-error"}
+    policy = dict(guard.DEFAULTS)
+    calls = []
+    with patch.object(guard, "_read_cache", side_effect=[
+            {"providers": {"anthropic": stale}}, {"providers": {"anthropic": failed}}]), \
+         patch.object(guard, "_spawn_poll_for_source"):
+        guard.gate_llm_execution(
+            lambda k, d: policy.get(k, d), provider="anthropic", model="offline",
+            api_mode="chat_completions", request={}, next_call=calls.append)
+    assert calls == [{}]
+
+
+def test_fetch_slot_claim_is_atomic_across_processes(guard, tmp_path, monkeypatch):
+    """A second caller sharing HERMES_HOME must not start its own read."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert guard._claim_fetch_slot("anthropic", 30.0) is True
+    assert guard._claim_fetch_slot("anthropic", 30.0) is False
+    assert guard._claim_fetch_slot("anthropic", 0.0) is True   # floor disabled
+
+
+def test_concurrent_callers_collapse_into_one_read(guard, tmp_path, monkeypatch):
+    """X guarded requests at once share the cache and cause one network read."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reads = []
+    barrier = threading.Barrier(8)
+
+    def spy(source_key, fetcher, sync_timeout_s=0.0):
+        reads.append(source_key)
+        time.sleep(0.25)   # keep the read in flight while the peers arrive
+        guard._merge_into_cache(source_key, {
+            "ok": True, "windows": [], "fetched_at": guard._now_utc().isoformat(),
+            "polled_at": guard._now_utc().isoformat()})
+
+    def worker():
+        barrier.wait(timeout=5)
+        guard._spawn_poll_for_source("anthropic", sync_timeout_s=1.0, min_interval_s=30.0)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    with patch.object(guard, "_spawn_poll", spy):
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+    assert reads == ["anthropic"]
 
 
 def test_no_other_plugin_is_used_as_a_usage_source(guard):
