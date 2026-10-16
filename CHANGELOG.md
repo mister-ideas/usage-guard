@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.2 — 2026-10-16
+
+Full scale pass over every usage value the guard ingests, and an explicit statement that the usage sources are Hermes' own providers.
+
+### Guard behavior
+
+- `source_scales` (new): declare a data source's value scale — `percent` (0-100, the host's `AccountUsageWindow.used_percent` contract, the default) or `fraction` (0-1, scaled ×100 at decision time). A fractional source that is not declared would read a full window as 1% and never block; an undeclared source whose values are all ≤ 1 is now logged once with the fix.
+- Out-of-range values (below 0, or above 100 after scaling) are treated as malformed evidence and deny, instead of being stored and compared.
+- The Anthropic source keeps its direct read, so its published percentages are never rescaled by the host's fraction heuristic.
+
+### Provenance
+
+- Usage sources are Hermes' own providers: the core fetcher for `openai-codex`/`openrouter` and a direct read for the Anthropic source, both using the logins Hermes already stores. No other plugin (notably not `quota`) is imported, read or required, and the guard's only cache is its own.
+
 ## 0.1.1 — 2026-10-16
 
 Fix a false "exhausted" reading on the Anthropic source — affecting every provider mapped to it (`anthropic`, `claude-subscription-directsdk-experimental`, and any user-mapped alias).

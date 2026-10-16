@@ -67,6 +67,12 @@ Not gated on stock Hermes (observer-only upstream hooks; this plugin does not pa
 
 On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
 
+## Usage sources and scale
+
+**Sources.** Every usage number comes from Hermes itself: the core fetcher `agent.account_usage.fetch_account_usage` — which resolves each provider's own stored login — for `openai-codex` and `openrouter`, and a direct read of the provider's usage endpoint for the Anthropic source using the same login Hermes stores. No other plugin is imported, read or required (notably not `quota`); the guard's only cache is its own under `$HERMES_HOME/plugin-data/usage-guard/`.
+
+**Scale.** Window values are percentages (0-100), per the host's `AccountUsageWindow.used_percent` contract, and the guard denies on a value outside that range instead of comparing it. A source that reports fractions (0-1) must be declared in `source_scales` — otherwise a full window would read as 1% used and never block. An undeclared source whose values are all ≤ 1 is logged once with that fix. The Anthropic source is read directly and is always percentages.
+
 ## Configuration
 
 Use Hermes' supported settings CLI/UI. Keys are under `plugins.entries.usage-guard.settings`:
@@ -80,6 +86,7 @@ Use Hermes' supported settings CLI/UI. Keys are under `plugins.entries.usage-gua
 | `poll_wait_timeout_s` | `20.0` | Bounded refresh wait on the stale path |
 | `refresh_every_request` | `true` | Require new evidence per guarded ingress |
 | `fail_open` | `false` | Keep false for safety |
+| `source_scales` | `{"anthropic": "percent", "openai-codex": "percent", "openrouter": "percent"}` | data-source key → value scale: `percent` (0-100) or `fraction` (0-1, scaled ×100 at decision time) |
 
 Custom provider plugins are gated by adding their IDs, e.g.:
 

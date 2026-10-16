@@ -629,3 +629,84 @@ def test_other_sources_use_the_core_fetcher(guard):
     with patch.object(guard, "_anthropic_snapshot", side_effect=AssertionError("not for codex")), \
          patch.dict(_sys.modules, {"agent": NS(), "agent.account_usage": core}):
         assert captured["fetcher"]().core == "openai-codex"
+
+
+# ── usage scale: every ingested value is normalized to percent (0-100) ───────
+# The host contract is ``AccountUsageWindow.used_percent`` in percent. A source
+# that reports fractions must be declared, or a full window (1.0) would read as
+# 1% and never block; out-of-range values deny instead of being compared.
+
+def invoke_source(guard, records, provider, **settings):
+    """Run one gate with cache records keyed by SOURCE key."""
+    policy = dict(guard.DEFAULTS, refresh_every_request=False)
+    policy.update(settings)
+    calls = []
+    with patch.object(guard, "_read_cache", return_value={"providers": records}), \
+         patch.object(guard, "_spawn_poll_for_source"):
+        out = guard.gate_llm_execution(
+            lambda key, default: policy.get(key, default),
+            provider=provider, model="offline", api_mode="chat_completions",
+            request={}, next_call=lambda req: calls.append(req))
+    return out, calls
+
+
+def test_fraction_scale_source_blocks_on_a_full_window(guard):
+    out, calls = invoke_source(
+        guard, {"fractional-src": make_record(1.0)}, provider="alias",
+        provider_keys=["alias"], provider_sources={"alias": "fractional-src"},
+        source_scales={"fractional-src": "fraction"})
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_fraction_scale_source_allows_below_the_threshold(guard):
+    _, calls = invoke_source(
+        guard, {"fractional-src-2": make_record(0.5)}, provider="alias",
+        provider_keys=["alias"], provider_sources={"alias": "fractional-src-2"},
+        source_scales={"fractional-src-2": "fraction"})
+    assert calls == [{}]
+
+
+def test_undeclared_source_is_read_as_percent_and_logged(guard, caplog):
+    """Percent is the contract default; an all-<=1 undeclared source warns once."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="plugins.usage-guard"):
+        _, calls = invoke_source(
+            guard, {"undeclared-scale-src": make_record(1.0)}, provider="alias",
+            provider_keys=["alias"], provider_sources={"alias": "undeclared-scale-src"})
+    assert calls == [{}]  # 1.0 read as 1% used, per the contract
+    assert any("not declared in source_scales" in r.getMessage() for r in caplog.records)
+
+
+def test_value_above_one_hundred_denies(guard):
+    out, calls = invoke_source(guard, {"anthropic": make_record(101)}, provider="anthropic")
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_fraction_scale_value_above_one_denies(guard):
+    out, calls = invoke_source(
+        guard, {"fractional-src-3": make_record(2.0)}, provider="alias",
+        provider_keys=["alias"], provider_sources={"alias": "fractional-src-3"},
+        source_scales={"fractional-src-3": "fraction"})
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_malformed_source_scales_deny(guard):
+    out, calls = invoke_source(guard, {"anthropic": make_record(10)},
+                               provider="anthropic", source_scales="percent")
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_no_other_plugin_is_used_as_a_usage_source(guard):
+    """Usage comes from Hermes' own providers; no plugin (e.g. quota) is read."""
+    from pathlib import Path
+    src = Path(guard.__file__).read_text()
+    assert "import quota" not in src
+    assert "quota_cache" not in src
+    assert ".hermes/plugins" not in src and "plugins/quota" not in src
+    assert "plugin-data/usage-guard" in src or "_CACHE_DIRNAME" in src
+    assert "agent.account_usage" in src
+    assert "agent.anthropic_credentials" in src
