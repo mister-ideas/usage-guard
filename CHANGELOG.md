@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 — 2026-10-16
+
+Repository hygiene only: `.ruff_cache/` joins the other cache directories in `.gitignore`, so a local lint run cannot leave an untracked directory in a clone. No plugin code changed.
+
 ## 0.2.1 — 2026-10-16
 
 Portability release: two assumptions about the author's own setup are gone, so the guard behaves correctly on a machine that is not a Claude-subscription desktop.
