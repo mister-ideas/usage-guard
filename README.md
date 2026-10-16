@@ -6,6 +6,16 @@
 
 Author: **mister-ideas**. MIT-licensed Hermes native plugin.
 
+## Why this exists
+
+Subscription plans now bill **extra usage** — paid overage once a plan window is exhausted — and on many accounts it is already switched on, whether an administrator enabled it or the plan ships with it. An unattended agent is exactly the workload that spends it: it keeps working at 100% used, and the first request past the wall is billed.
+
+This plugin makes Hermes stop at the wall instead. When a subscription window reads fully used, the provider dispatch is refused, so the agent reports the limit rather than spending beyond it. It reads the subscription usage Hermes already displays; it never touches your account, billing or credit settings, and it never holds your credentials.
+
+Who it is for: anyone on a subscription whose account allows extra usage and who wants the agent confined to the subscription allowance — including a shared or company plan, where one agent should not consume the organization's paid credits.
+
+**What it is not.** It cannot guarantee zero extra usage: a request that starts inside the allowance can still spill into paid usage on the provider's side, and the guard stops the next one (see [Provenance and limits](#provenance-and-limits)). If you need a hard guarantee, disable extra usage on the account itself — this plugin is the in-Hermes layer that keeps the agent from crossing the line on its own.
+
 ## Policy
 
 Registers `llm_execution` middleware, with an independent cache over `agent.account_usage.fetch_account_usage`. It depends on nothing beyond Hermes itself.

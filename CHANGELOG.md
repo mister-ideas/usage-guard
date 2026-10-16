@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7 — 2026-10-16
+
+Say why the plugin exists. The README gains a "Why this exists" section and the catalog entry's description leads with the purpose — keeping an agent inside the subscription allowance on an account that allows paid extra usage — instead of only describing the mechanism. Documentation only.
+
 ## 0.2.6 — 2026-10-16
 
 Fix a trailing blank line in `CODE_OF_CONDUCT.md` that failed the CI whitespace check on 0.2.5. Documentation only.
