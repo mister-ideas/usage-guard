@@ -108,6 +108,73 @@ def test_fail_open_allows_unavailable(guard):
     assert calls == [{}]
 
 
+# ── a source with no usage surface is not gated ──────────────────────────────
+
+_OAUTH_ONLY_REASON = "Anthropic account limits are only available for OAuth-backed Claude accounts."
+
+
+def test_a_source_without_a_usage_surface_is_not_gated(guard):
+    """An Anthropic API-key account publishes no subscription limits, so there is
+    nothing to guard: refusing would block a healthy account."""
+    rec = make_record(0, ok=True, windows=[], unavailable_reason=_OAUTH_ONLY_REASON)
+    out, calls = invoke(guard, rec)
+    assert calls == [{}]
+    assert getattr(out, "usage_guard_blocked", None) is not True
+
+
+def test_a_source_without_a_usage_surface_is_reported_once(guard, caplog):
+    rec = make_record(0, ok=True, windows=[], unavailable_reason=_OAUTH_ONLY_REASON)
+    guard._no_usage_surface_warned.clear()
+    with caplog.at_level("WARNING", logger="plugins.usage-guard"):
+        invoke(guard, rec)
+        invoke(guard, rec)
+    hits = [r.getMessage() for r in caplog.records if "no account usage to guard" in r.getMessage()]
+    assert len(hits) == 1
+
+
+def test_every_own_failure_reason_still_denies(guard):
+    """Only a reason the core reports passes; this plugin's own reasons stay fail-closed."""
+    for reason in sorted(guard._OWN_UNAVAILABLE_REASONS):
+        rec = make_record(10, ok=False, windows=[], unavailable_reason=reason)
+        out, calls = invoke(guard, rec)
+        assert calls == [], reason
+        assert out.usage_guard_blocked is True, reason
+
+
+# ── durable state: the plugin's own data dir, resolved per call ──────────────
+
+def test_cache_path_uses_the_plugin_data_dir(guard):
+    """State lives in the documented per-plugin data dir, which follows the profile."""
+    import sys
+    import types
+    from pathlib import Path
+
+    seen: list[str] = []
+    fake = types.ModuleType("plugins.plugin_storage")
+
+    def fake_dir(name):
+        seen.append(name)
+        return Path("/profile-home/plugin-data") / name
+
+    fake.plugin_data_dir = fake_dir
+    pkg = types.ModuleType("plugins")
+    pkg.__path__ = []
+    with patch.dict(sys.modules, {"plugins": pkg, "plugins.plugin_storage": fake}):
+        assert guard._cache_path() == os.path.join(
+            "/profile-home/plugin-data", "usage-guard", "usage.json")
+    assert seen == ["usage-guard"]
+
+
+def test_cache_path_falls_back_to_hermes_home(guard, tmp_path, monkeypatch):
+    """Without the storage helper the same layout is derived from HERMES_HOME."""
+    import sys
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    with patch.dict(sys.modules, {"plugins.plugin_storage": None}):
+        assert guard._cache_path() == os.path.join(
+            str(tmp_path), "plugin-data", "usage-guard", "usage.json")
+
+
 # ── stale data and the refresh policy ─────────────────────────────────────
 
 def test_stale_snapshot_denies_fail_closed(guard):
