@@ -700,6 +700,89 @@ def test_malformed_source_scales_deny(guard):
     assert out.usage_guard_blocked is True
 
 
+# ── rate limiting must never refuse a request on its own ────────────────────
+# A 429 (or any transport failure) is not evidence about allowance: the last
+# good snapshot keeps deciding for up to stale_grace_s, the backoff only
+# suppresses new reads, and a failed refresh never erases the evidence.
+
+def _aged(seconds, **kwargs):
+    return make_record(fetched_at=(NOW - timedelta(seconds=seconds)).isoformat(), **kwargs)
+
+
+def test_rate_limited_refresh_with_recent_evidence_allows(guard):
+    rec = _aged(120, used=10, unavailable_reason="fetch-error",
+                backoff_until=(NOW + timedelta(seconds=300)).isoformat())
+    _, calls = invoke(guard, rec)
+    assert calls == [{}]
+
+
+def test_rate_limited_refresh_still_blocks_an_exhausted_window(guard):
+    rec = _aged(120, used=100, unavailable_reason="fetch-error",
+                backoff_until=(NOW + timedelta(seconds=300)).isoformat())
+    out, calls = invoke(guard, rec)
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_rate_limited_refresh_without_any_evidence_denies(guard):
+    rec = {"ok": False, "windows": [], "fetched_at": None,
+           "unavailable_reason": "fetch-error",
+           "backoff_until": (NOW + timedelta(seconds=300)).isoformat()}
+    out, calls = invoke(guard, rec)
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_evidence_older_than_the_grace_window_denies(guard):
+    rec = _aged(5000, used=10, unavailable_reason="fetch-error",
+                backoff_until=(NOW + timedelta(seconds=300)).isoformat())
+    out, calls = invoke(guard, rec, stale_grace_s=900.0)
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_grace_window_zero_restores_the_strict_stale_policy(guard):
+    rec = _aged(120, used=10, unavailable_reason="fetch-error",
+                backoff_until=(NOW + timedelta(seconds=300)).isoformat())
+    out, calls = invoke(guard, rec, stale_grace_s=0.0)
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_failed_refresh_preserves_the_last_good_windows(guard):
+    previous = make_record(used=42)
+    exc = NS(response=NS(status_code=429, headers={"Retry-After": "300"}))
+    rec = guard._failure_record("anthropic", previous, exc)
+    assert rec["windows"] == previous["windows"]
+    assert rec["fetched_at"] == previous["fetched_at"]
+    assert rec["ok"] is False and rec["unavailable_reason"] == "fetch-error"
+    assert guard._parse_ts(rec["backoff_until"]) > NOW
+
+
+def test_backoff_respects_retry_after_and_grows_on_repeats(guard):
+    exc = NS(response=NS(status_code=429, headers={"Retry-After": "300"}))
+    first = guard._failure_record("anthropic", make_record(), exc)
+    assert (guard._parse_ts(first["backoff_until"]) - NOW).total_seconds() >= 300
+    no_header = NS(response=NS(status_code=429, headers={}))
+    grown = guard._failure_record(
+        "anthropic", {**make_record(), "consecutive_failures": 3}, no_header)
+    assert (guard._parse_ts(grown["backoff_until"]) - NOW).total_seconds() >= 120
+    assert grown["consecutive_failures"] == 4
+
+
+def test_min_fetch_interval_skips_a_repeat_read(guard):
+    calls = []
+    recent = {"last_attempt_at": NOW.isoformat()}
+    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": recent}}), \
+         patch.object(guard, "_spawn_poll", side_effect=lambda *a, **k: calls.append(a)):
+        guard._spawn_poll_for_source("anthropic", min_interval_s=30.0)
+    assert calls == []
+    with patch.object(guard, "_read_cache", return_value={"providers": {}}), \
+         patch.object(guard, "_spawn_poll", side_effect=lambda *a, **k: calls.append(a)):
+        guard._spawn_poll_for_source("anthropic", min_interval_s=30.0)
+    assert len(calls) == 1
+
+
 def test_no_other_plugin_is_used_as_a_usage_source(guard):
     """Usage comes from Hermes' own providers; no plugin (e.g. quota) is read."""
     from pathlib import Path

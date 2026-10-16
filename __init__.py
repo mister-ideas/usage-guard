@@ -69,9 +69,18 @@ DEFAULTS: dict[str, Any] = {
     "threshold_percent": 100.0,
     # Snapshots older than this are stale (see module policy).
     "max_cache_age_s": 60.0,
+    # While a refresh is failing or rate-limited, the last good snapshot stays
+    # usable for up to this long instead of refusing the request. 0 disables it
+    # (a failed refresh then follows the stale-data policy immediately).
+    "stale_grace_s": 900.0,
     # On the stale path, wait at most this long (seconds) for the refresh to
     # land before applying the stale-data policy. 0 disables the wait.
     "poll_wait_timeout_s": 20.0,
+    # Hard floor between two network reads of one source, enforced across
+    # processes through the cache. This is what keeps the usage endpoint from
+    # rate-limiting us when several ingresses (main turn, auxiliary calls, MoA
+    # slots, subagents) are guarded at once. 0 disables the floor.
+    "min_fetch_interval_s": 30.0,
     # False: deny on stale/missing/unavailable data (recommended). True: allow.
     "fail_open": False,
     "refresh_every_request": True,
@@ -94,6 +103,13 @@ _UNAVAILABLE_NOTICE = (
 _CACHE_DIRNAME = "usage-guard"
 _CACHE_FILENAME = "usage.json"
 _CACHE_LOCK_TIMEOUT_S = 10.0
+
+# Rate-limit backoff on a rejected refresh: honour Retry-After, never wait less
+# than an exponentially growing floor, cap the wait, and add jitter so several
+# processes sharing one endpoint do not retry in lockstep.
+_BACKOFF_BASE_S = 30.0
+_BACKOFF_MAX_S = 900.0
+_BACKOFF_JITTER = 0.2
 
 # In-process lock; the file lock below covers cross-process (desktop backend
 # and gateway share HERMES_HOME). RLock would hide nesting bugs; the merge
@@ -397,6 +413,83 @@ def _fresh(record: Optional[dict[str, Any]], max_age_s: float, now: Optional[dat
     return 0.0 <= age <= max_age_s
 
 
+def _evidence_age_s(record: Optional[dict[str, Any]], now: datetime) -> Optional[float]:
+    """Seconds since the snapshot's windows were captured, or None if unknown."""
+    if not isinstance(record, dict):
+        return None
+    fetched = _parse_ts(record.get("fetched_at"))
+    if fetched is None:
+        return None
+    try:
+        age = (now - fetched).total_seconds()
+    except OverflowError:
+        return None
+    return age if age >= 0.0 else None
+
+
+_stale_evidence_lock = threading.Lock()
+_stale_evidence_warned: set[str] = set()
+
+
+def _warn_stale_evidence_once(source_key: str, age: float) -> None:
+    """Log once per source that decisions are using the last good snapshot.
+
+    A rate limit or a transport error is not evidence that allowance changed, so
+    the guard keeps deciding on the last snapshot it actually read. The warning
+    makes that visible without turning it into a refusal.
+    """
+    with _stale_evidence_lock:
+        if source_key in _stale_evidence_warned:
+            return
+        _stale_evidence_warned.add(source_key)
+    LOG.warning(
+        "usage-guard: serving the last usage snapshot for %s (%.0fs old) because the usage "
+        "endpoint is rate-limiting or failing; the exhaustion check still applies to it.",
+        source_key, age,
+    )
+
+
+def _failure_record(source_key: str, previous: dict[str, Any], exc: BaseException) -> dict[str, Any]:
+    """Build the record for a failed refresh WITHOUT discarding good evidence.
+
+    The windows and their ``fetched_at`` are carried forward: a rate limit says
+    nothing about allowance, and ``_decide_provider`` decides how long the last
+    good snapshot stays usable (``stale_grace_s``). Only a 429 sets a backoff,
+    which suppresses new reads rather than refusing requests.
+    """
+    failures = previous.get("consecutive_failures")
+    failures = failures + 1 if isinstance(failures, int) and not isinstance(failures, bool) else 1
+    record: dict[str, Any] = {
+        "ok": False,
+        "unavailable_reason": "fetch-error",
+        "last_error_at": _now_utc().isoformat(),
+        "consecutive_failures": failures,
+        "windows": list(previous.get("windows") or []),
+        "fetched_at": previous.get("fetched_at"),
+    }
+    for carried in ("codex_rate_blocked", "raw_present"):
+        if carried in previous:
+            record[carried] = previous[carried]
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        retry_after = (getattr(getattr(exc, "response", None), "headers", {}) or {}).get("Retry-After")
+        try:
+            requested = float(retry_after) if retry_after else 0.0
+        except (TypeError, ValueError):
+            requested = 0.0
+        grown = min(_BACKOFF_BASE_S * (2 ** (failures - 1)), _BACKOFF_MAX_S)
+        backoff_s = min(max(requested, grown), _BACKOFF_MAX_S)
+        # Jitter (derived from uuid4, so no extra import) spreads retries across
+        # the desktop backend and the gateway sharing one endpoint.
+        backoff_s *= 1.0 + _BACKOFF_JITTER * ((uuid.uuid4().int % 1000) / 1000.0)
+        record["backoff_until"] = (_now_utc() + timedelta(seconds=backoff_s)).isoformat()
+        LOG.warning(
+            "usage-guard: usage endpoint rate-limited the refresh for %s; backing off %.0fs",
+            source_key, backoff_s,
+        )
+    return record
+
+
 def _exhausted_windows(
     record: Optional[dict[str, Any]], threshold_percent: float, now: Optional[datetime] = None
 ) -> list[dict[str, Any]]:
@@ -452,6 +545,8 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
         return False
 
     def _run() -> None:
+        previous = _read_cache().get("providers", {}).get(source_key)
+        previous = previous if isinstance(previous, dict) else {}
         try:
             snapshot = fetcher()
             record = _snapshot_record(snapshot)
@@ -459,23 +554,11 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
                 record = {"ok": False, "reason": "no-usable-windows"}
         except Exception as exc:
             LOG.debug("usage-guard poll for %s failed", source_key, exc_info=True)
-            record = {
-                "ok": False, "unavailable_reason": "fetch-error", "windows": [],
-                "fetched_at": _now_utc().isoformat(),
-            }
-            # M1: the usage endpoint rate-limiting us must not turn into a
-            # tight retry loop. Record a bounded backoff; decisions deny
-            # (fail-closed) until it expires — never reuse stale evidence.
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status == 429:
-                retry_after = (getattr(getattr(exc, "response", None), "headers", {}) or {}).get("Retry-After")
-                try:
-                    backoff_s = min(max(float(retry_after), 1.0), 600.0) if retry_after else 60.0
-                except (TypeError, ValueError):
-                    backoff_s = 60.0
-                record["backoff_until"] = (_now_utc() + timedelta(seconds=backoff_s)).isoformat()
-                LOG.warning("usage-guard: usage endpoint rate-limited the refresh for %s; backing off %.0fs",
-                            source_key, backoff_s)
+            # A failed refresh keeps the last good evidence and never refuses a
+            # request on its own; only a 429 sets a backoff, and a backoff
+            # suppresses new reads rather than denying dispatch.
+            record = _failure_record(source_key, previous, exc)
+        record["last_attempt_at"] = _now_utc().isoformat()
         record["polled_at"] = _now_utc().isoformat()
         try:
             _merge_into_cache(source_key, record)
@@ -610,6 +693,20 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         else:
             settings["poll_wait_timeout_s"] = poll_wait
 
+        stale_grace = _max_age(get_config("stale_grace_s", DEFAULTS["stale_grace_s"]))
+        if stale_grace is None:
+            config_ok = False
+            LOG.warning("usage-guard: malformed stale_grace_s; using default")
+        else:
+            settings["stale_grace_s"] = stale_grace
+
+        min_interval = _max_age(get_config("min_fetch_interval_s", DEFAULTS["min_fetch_interval_s"]))
+        if min_interval is None:
+            config_ok = False
+            LOG.warning("usage-guard: malformed min_fetch_interval_s; using default")
+        else:
+            settings["min_fetch_interval_s"] = min_interval
+
         for key in ("refresh_every_request",):
             value = get_config(key, DEFAULTS[key])
             if not isinstance(value, bool):
@@ -727,68 +824,78 @@ def _decide_provider(
     if not isinstance(record, dict):
         record = None
 
-    # M1: the usage endpoint rate-limited the last refresh. Deny until the
-    # backoff expires — regardless of cache freshness — never reuse evidence
-    # gathered before a rejected refresh to allow a dispatch.
+    # A rate limit or a transport error is not evidence about allowance, so it
+    # never refuses a request on its own. While a refresh is failing, the last
+    # good snapshot stays usable for up to ``stale_grace_s`` and the exhaustion
+    # interlock applies to it unchanged; the backoff only suppresses new reads.
     backoff_until = _parse_ts((record or {}).get("backoff_until")) if isinstance(record, dict) else None
-    if backoff_until is not None and backoff_until > now:
-        return _Decision(
-            False,
-            "Usage guard: the usage endpoint is temporarily rate-limiting quota checks "
-            f"(backing off until {backoff_until.astimezone().strftime('%H:%M:%S')}); "
-            "the request was not sent. The next request after the backoff re-checks usage.",
-            "usage-endpoint backoff",
-        )
+    backing_off = backoff_until is not None and backoff_until > now
+    evidence_age = _evidence_age_s(record, now)
+    last_read_failed = bool((record or {}).get("unavailable_reason"))
+    stale_usable = (
+        evidence_age is not None
+        and evidence_age <= settings["stale_grace_s"]
+        and (backing_off or last_read_failed)
+    )
 
-    if settings.get("refresh_every_request", True) or not _fresh(record, settings["max_cache_age_s"], now):
+    if not backing_off and (
+        settings.get("refresh_every_request", True) or not _fresh(record, settings["max_cache_age_s"], now)
+    ):
         previous_fetched = (record or {}).get("fetched_at")
         previous_polled = (record or {}).get("polled_at")
         if spawn_poll:
             # Refresh bounded-synchronously so the decision uses fresh data
             # instead of denying the first request after the cache ages out.
             # A poll for this source may already be in flight from another
-            # request — the call below waits for that one to land.
+            # request — the call below waits for that one to land, and the
+            # min-interval floor caps how often the endpoint is read at all.
             _spawn_poll_for_source(
-                source_key, sync_timeout_s=settings["poll_wait_timeout_s"]
+                source_key,
+                sync_timeout_s=settings["poll_wait_timeout_s"],
+                min_interval_s=settings["min_fetch_interval_s"],
             )
             refreshed = _read_cache().get("providers", {}).get(source_key)
             if isinstance(refreshed, dict) and _fresh(
                 refreshed, settings["max_cache_age_s"], _now_utc()
             ):
                 record = refreshed
-        if settings.get("refresh_every_request", True) and (
+        if not stale_usable and settings.get("refresh_every_request", True) and (
             (record or {}).get("fetched_at") == previous_fetched
             and (record or {}).get("polled_at") == previous_polled
         ):
             # m4: confirmation is (fetched_at, polled_at) — polled_at is
             # stamped by the poller on every completed fetch, including one
-            # landing within the same second as the previous fetch.
+            # landing within the same second as the previous fetch. A refresh
+            # that could not land only refuses when no usable evidence remains.
             return _Decision(False, "Usage guard: a new usage snapshot could not be verified; the request was not sent.", "refresh not confirmed")
-        if not _fresh(record, settings["max_cache_age_s"], _now_utc()):
-            reason = (
-                record.get("unavailable_reason")
-                if isinstance(record, dict) and record.get("unavailable_reason")
-                else "no fresh snapshot"
-            )
-            if settings["fail_open"] and config_ok:
-                return _Decision(True, reason=reason)
-            return _Decision(
-                False,
-                _UNAVAILABLE_NOTICE.format(provider=provider, reason=reason),
-                reason=reason,
-            )
 
-    if record.get("unavailable_reason"):
+    if not _fresh(record, settings["max_cache_age_s"], _now_utc()) and not stale_usable:
+        reason = (
+            record.get("unavailable_reason")
+            if isinstance(record, dict) and record.get("unavailable_reason")
+            else "no fresh snapshot"
+        )
         if settings["fail_open"] and config_ok:
-            return _Decision(
-                True, reason=str(record.get("unavailable_reason"))
-            )
+            return _Decision(True, reason=reason)
         return _Decision(
             False,
-            _UNAVAILABLE_NOTICE.format(
-                provider=provider, reason=record.get("unavailable_reason")
-            ),
-            reason=str(record.get("unavailable_reason")),
+            _UNAVAILABLE_NOTICE.format(provider=provider, reason=reason),
+            reason=reason,
+        )
+
+    if stale_usable and not _fresh(record, settings["max_cache_age_s"], _now_utc()):
+        _warn_stale_evidence_once(source_key, evidence_age or 0.0)
+
+    # The latest read failed and left no windows to evaluate: there is nothing
+    # to decide on, so the unavailable policy applies (fail_open honored).
+    if isinstance(record, dict) and record.get("unavailable_reason") and not record.get("windows"):
+        reason = str(record.get("unavailable_reason"))
+        if settings["fail_open"] and config_ok:
+            return _Decision(True, reason=reason)
+        return _Decision(
+            False,
+            _UNAVAILABLE_NOTICE.format(provider=provider, reason=reason),
+            reason=reason,
         )
 
     # Normalize to the guard's percentage scale before validating: the host
@@ -800,7 +907,11 @@ def _decide_provider(
     record = _scaled_record(record, source_scale)
 
     windows = record.get("windows")
-    if record.get("ok") is not True or not isinstance(windows, list) or not windows:
+    if not isinstance(windows, list) or not windows:
+        # Reached only with no usable evidence at all: the staleness policy
+        # above accepts a within-grace snapshot whose latest refresh failed
+        # (``ok`` false, windows carried forward), so a populated window list is
+        # the actual requirement.
         return _Decision(False, "Usage guard: usable allowance evidence is missing; the request was not sent.", "invalid allowance evidence")
     for window in windows:
         if not isinstance(window, dict):
@@ -931,8 +1042,16 @@ def _anthropic_snapshot() -> Any:
     return _snapshot_like(raw=payload) if isinstance(payload, dict) else None
 
 
-def _spawn_poll_for_source(source_key: str, sync_timeout_s: float = 0.0) -> None:
+def _spawn_poll_for_source(
+    source_key: str, sync_timeout_s: float = 0.0, min_interval_s: float = 0.0
+) -> None:
     """Best-effort: start one bounded fetch of the source's usage.
+
+    ``min_interval_s`` > 0 enforces a hard floor between network reads of this
+    source across processes (the last attempt is recorded in the cache), so a
+    burst of guarded ingresses can never become a burst of usage-endpoint
+    requests. The endpoint's own rate limit is what makes it stop answering,
+    which is the only reason the guard could not refresh.
 
     The core import happens inside the worker thread — if the core module is
     absent the poll records ``fetch-error`` and the guard keeps its on-disk
@@ -957,6 +1076,16 @@ def _spawn_poll_for_source(source_key: str, sync_timeout_s: float = 0.0) -> None
         from agent.account_usage import fetch_account_usage as core_fetch
 
         return core_fetch(source_key)
+
+    if min_interval_s > 0.0:
+        existing = _read_cache().get("providers", {}).get(source_key)
+        last_attempt = _parse_ts(existing.get("last_attempt_at")) if isinstance(existing, dict) else None
+        if last_attempt is not None:
+            try:
+                if (_now_utc() - last_attempt).total_seconds() < min_interval_s:
+                    return
+            except OverflowError:
+                pass
 
     _spawn_poll(source_key, _fetch, sync_timeout_s=sync_timeout_s)
 
