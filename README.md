@@ -8,19 +8,19 @@ Registers `llm_execution` middleware, with an independent cache over `agent.acco
 
 **The only blocking point is a subscription usage window at/over the threshold.** With `threshold_percent=100`, requests pass while any subscription allowance remains (0% left = blocked) and are denied the moment a window is fully used. No account-level extra-usage or credit state is read or enforced; the plugin never touches account or billing settings. MoA turns are gated through the running preset: every enabled reference slot and the aggregator whose provider is in `provider_keys` is checked, and the turn is refused when any of them is exhausted.
 
-Defaults: guard `anthropic` and `openai-codex` (stock providers); refresh at every ingress (20-second bounded wait); deny at the threshold; maximum snapshot age 60 seconds; `fail_open=false`.
+Defaults: guard `anthropic` and `openai-codex` (stock providers); refresh on a 60-second freshness TTL with a 30-second per-source floor (20-second bounded wait on the stale path); deny at the threshold; `fail_open=false`.
 
 ## Freshness on long runs
 
-Usage limits are pulled as often as needed so decisions never rely on late information:
+Usage limits are pulled as often as the endpoint tolerates, so decisions rest on the freshest evidence the guard can get:
 
 - The endpoint is read on a freshness TTL (`max_cache_age_s`), never per request: every guarded ingress shares one cache, and concurrent ones collapse into a single read.
 - On the stale path the guard waits up to `poll_wait_timeout_s` for a synchronous refresh before deciding; stale/missing/malformed evidence denies (`fail_open=false`). With the usage endpoint unresponsive, a guarded call can stall up to this long before denying.
 - Simultaneous refreshes for the same provider are coalesced (one in-flight poll; waiters share its result).
-- If the usage endpoint answers HTTP 429, the guard records a bounded backoff (`Retry-After`, capped at 10 minutes) and denies with a clear notice until it expires — stale evidence is never reused to allow a call.
+- If the usage endpoint answers HTTP 429, the guard records a bounded backoff (`Retry-After`, capped at 15 minutes and growing with repeated failures) and keeps deciding on the last good snapshot for up to `stale_grace_s` — a rate limit alone never refuses a request.
 - A past `reset_at` is not treated as replenishment without fresh confirmation.
 
-These layers mean a long run that exhausts its window mid-run is stopped at the next guarded ingress on fresh data, not on a stale 60-minute-old reading. **An in-flight request cannot be recalled**: a request that starts inside the allowance and spills to paid usage within the same provider-side request is billed before the next snapshot can observe it; the guard stops the *next* request.
+These layers mean a long run that exhausts its window mid-run is stopped at the next guarded ingress on fresh data, not on a stale reading. **An in-flight request cannot be recalled**: a request that starts inside the allowance and spills to paid usage within the same provider-side request is billed before the next snapshot can observe it; the guard stops the *next* request.
 
 ## Install
 

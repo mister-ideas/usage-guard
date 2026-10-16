@@ -2,15 +2,20 @@
 
 The only blocking point is a subscription usage window at/over the threshold
 (default 100% used = 0% left). No account-level extra-usage or credit policy
-is enforced. Snapshots are refreshed as often as needed: at every guarded
-ingress by default (with an unconfirmed-refresh deny), bounded synchronous
-wait on the stale path, fail-closed on stale/missing/malformed evidence — so
-long runs never act on late usage information.
+is enforced.
 
-Own account-usage cache; no quota-plugin dependency. The Anthropic source is
-read directly: the host's parser scales any utilization <= 1 by 100, so a
-healthy 1% week would arrive as 100% and the guard would refuse a healthy
-account. Refusal replies are marked
+Usage evidence lives in this plugin's own cache and is refreshed on a freshness
+TTL, bounded by a per-source minimum interval and by any rate-limit backoff.
+Every guarded ingress shares that cache, and concurrent ones collapse into a
+single read, so the guard's own request rate cannot rate-limit the endpoint it
+reads. A read that fails or is rate-limited keeps the last good snapshot and
+decides on it; evidence that is stale, missing or malformed denies
+(fail-closed), so a long run never acts on usage information the guard could
+not confirm.
+
+The Anthropic source is read directly: the host's parser scales any utilization
+<= 1 by 100, so a healthy 1% week would arrive as 100% and the guard would refuse
+a healthy account. Refusal replies are marked
 usage_guard_blocked so host auxiliary paths reject them before provider dispatch.
 On stock Hermes this gates main-loop llm_execution dispatches, including MoA
 turns (the running preset's enabled slots are resolved and checked). Auxiliary
@@ -257,7 +262,7 @@ def _write_cache(cache: dict[str, Any], path: Optional[str] = None) -> None:
         LOG.debug("usage-guard cache write failed", exc_info=True)
 
 
-# ── snapshot → cache record (our own serialization, no quota plugin code) ────
+# ── snapshot → cache record (our own serialization) ─────────────────────────
 
 def _window_record(window: Any) -> Optional[dict[str, Any]]:
     label = getattr(window, "label", None)
@@ -915,7 +920,7 @@ def _decide_provider(
             return _Decision(False, "Usage guard: malformed allowance window; the request was not sent.", "invalid window")
 
     if source_key == "anthropic" and not record.get("raw_present") and not raw_warning_done():
-        # M2: the guard reads the Anthropic payload itself; a record without raw
+        # The guard reads the Anthropic payload itself; a record without raw
         # means that read was unavailable and the host fetcher was used, so only
         # its classic windows are gated (and its sub-1% values may be inflated).
         LOG.warning(
