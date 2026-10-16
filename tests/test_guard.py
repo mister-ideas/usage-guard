@@ -530,3 +530,102 @@ def test_moa_turn_allows_unresolvable_preset_when_fail_open(guard):
             provider="moa", model="default", api_mode="chat_completions",
             request={}, next_call=lambda req: calls.append(req))
     assert calls == [{}]
+
+
+# ── Anthropic scale: the host inflates sub-1% utilization ×100 ───────────────
+# The OAuth usage payload's ``utilization``/``percent`` values are percentages
+# (proved by limits[]: session 4, weekly_all 1). The host fetcher passes
+# fraction=True, which multiplies any value <= 1 by 100 — a 1% week arrives as
+# 100% and the guard would refuse a healthy account. The plugin reads the
+# payload itself and never scales these values.
+
+ANTHROPIC_PAYLOAD = {
+    "five_hour": {"utilization": 4.0, "resets_at": "2026-10-16T13:09:59+00:00"},
+    "seven_day": {"utilization": 1.0, "resets_at": "2026-10-17T00:59:59+00:00"},
+    "seven_day_oauth_apps": None,
+    "seven_day_opus": None,
+    "seven_day_sonnet": None,
+    "limits": [
+        {"kind": "session", "group": "session", "percent": 4, "severity": "normal",
+         "resets_at": "2026-10-16T13:09:59+00:00", "scope": None, "is_active": True},
+        {"kind": "weekly_all", "group": "weekly", "percent": 1, "severity": "normal",
+         "resets_at": "2026-10-17T00:59:59+00:00", "scope": None, "is_active": False},
+    ],
+    "extra_usage": {"is_enabled": True, "used_credits": 286.0, "monthly_limit": 50000,
+                    "utilization": 0.572, "currency": "EUR"},
+}
+
+
+def anthropic_record(guard, payload=None):
+    return guard._snapshot_record(guard._snapshot_like(raw=payload or ANTHROPIC_PAYLOAD))
+
+
+def test_anthropic_payload_percentages_are_never_scaled(guard):
+    """A 1% week stays 1%; nothing becomes 100%."""
+    by_label = {w["label"]: w["used_percent"] for w in anthropic_record(guard)["windows"]}
+    assert by_label["five_hour"] == 4.0
+    assert by_label["seven_day"] == 1.0
+    assert 100.0 not in by_label.values()
+
+
+def test_anthropic_limits_array_is_gated(guard):
+    by_label = {w["label"]: w["used_percent"] for w in anthropic_record(guard)["windows"]}
+    assert by_label["limit:session"] == 4.0
+    assert by_label["limit:weekly_all"] == 1.0
+
+
+def test_anthropic_healthy_week_passes_the_gate(guard):
+    """Regression: a 1% week must not block (the host reports it as 100%)."""
+    _, calls = invoke(guard, anthropic_record(guard))
+    assert calls == [{}]
+
+
+def test_anthropic_full_week_still_blocks(guard):
+    payload = dict(ANTHROPIC_PAYLOAD,
+                   seven_day={"utilization": 100.0, "resets_at": "2026-10-17T00:59:59+00:00"})
+    out, calls = invoke(guard, anthropic_record(guard, payload))
+    assert calls == []
+    assert out.usage_guard_blocked is True
+
+
+def test_anthropic_snapshot_returns_none_without_the_core(guard):
+    """Offline / non-Hermes: no core credential resolver -> no direct read."""
+    assert guard._anthropic_snapshot() is None
+
+
+def _capture_source_fetcher(guard, source_key):
+    captured = {}
+
+    def fake_spawn(source_key_, fetcher, sync_timeout_s=0.0):
+        captured["source_key"] = source_key_
+        captured["fetcher"] = fetcher
+        return True
+
+    with patch.object(guard, "_spawn_poll", side_effect=fake_spawn):
+        guard._spawn_poll_for_source(source_key)
+    return captured
+
+
+def test_anthropic_source_prefers_the_direct_read(guard):
+    captured = _capture_source_fetcher(guard, "anthropic")
+    sentinel = NS(raw={"direct": True})
+    with patch.object(guard, "_anthropic_snapshot", return_value=sentinel):
+        assert captured["fetcher"]() is sentinel
+
+
+def test_anthropic_source_falls_back_to_the_core_fetcher(guard):
+    import sys as _sys
+    captured = _capture_source_fetcher(guard, "anthropic")
+    core = NS(fetch_account_usage=lambda key: NS(core="anthropic"))
+    with patch.object(guard, "_anthropic_snapshot", return_value=None), \
+         patch.dict(_sys.modules, {"agent": NS(), "agent.account_usage": core}):
+        assert captured["fetcher"]().core == "anthropic"
+
+
+def test_other_sources_use_the_core_fetcher(guard):
+    import sys as _sys
+    captured = _capture_source_fetcher(guard, "openai-codex")
+    core = NS(fetch_account_usage=lambda key: NS(core=key))
+    with patch.object(guard, "_anthropic_snapshot", side_effect=AssertionError("not for codex")), \
+         patch.dict(_sys.modules, {"agent": NS(), "agent.account_usage": core}):
+        assert captured["fetcher"]().core == "openai-codex"

@@ -1,6 +1,6 @@
 name: usage-guard
-version: 0.1.0
-description: "Usage-exhaustion guard: polls agent.account_usage.fetch_account_usage (own cache, no quota-plugin dependency) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; configurable stale-data policy (fail-closed by default)."
+version: 0.1.1
+description: "Usage-exhaustion guard: reads account usage into its own cache (core fetcher; a direct read for the Anthropic source, whose host parser inflates sub-1% windows) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
 kind: standalone

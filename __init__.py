@@ -7,7 +7,10 @@ ingress by default (with an unconfirmed-refresh deny), bounded synchronous
 wait on the stale path, fail-closed on stale/missing/malformed evidence — so
 long runs never act on late usage information.
 
-Own account-usage cache; no quota-plugin dependency. Refusal replies are marked
+Own account-usage cache; no quota-plugin dependency. The Anthropic source is
+read directly: the host's parser scales any utilization <= 1 by 100, so a
+healthy 1% week would arrive as 100% and the guard would refuse a healthy
+account. Refusal replies are marked
 usage_guard_blocked so host auxiliary paths reject them before provider dispatch.
 On stock Hermes this gates main-loop llm_execution dispatches, including MoA
 turns (the running preset's enabled slots are resolved and checked). Auxiliary
@@ -710,13 +713,12 @@ def _decide_provider(
             return _Decision(False, "Usage guard: malformed allowance window; the request was not sent.", "invalid window")
 
     if source_key == "anthropic" and not record.get("raw_present") and not raw_warning_done():
-        # M2: stock upstream core does not attach raw to Anthropic snapshots,
-        # so the extra raw-window ingestion (seven_day_* buckets, limits[])
-        # has nothing to read. Classic windows still gate; say so once.
+        # M2: the guard reads the Anthropic payload itself; a record without raw
+        # means that read was unavailable and the host fetcher was used, so only
+        # its classic windows are gated (and its sub-1% values may be inflated).
         LOG.warning(
-            "usage-guard: the Anthropic usage snapshot has no raw payload in this Hermes "
-            "build; only the classic windows are gated. Raw-window gating requires a core "
-            "that passes raw=payload in _fetch_anthropic_account_usage."
+            "usage-guard: the Anthropic usage snapshot has no raw payload (the direct read was "
+            "unavailable); only the host's classic windows are gated."
         )
         _mark_raw_warning()
 
@@ -749,12 +751,96 @@ def _decide_provider(
     )
 
 
+# ── anthropic usage read ─────────────────────────────────────────────────────
+# The host's Anthropic fetcher parses the OAuth usage payload with
+# ``fraction=True``: any ``utilization`` <= 1 is multiplied by 100. That payload
+# is a percentage scale — its own ``limits[]`` array reports the same windows as
+# ``percent`` (session 4, weekly_all 1) — so a healthy 1% week arrives as 100%
+# and the guard would refuse a healthy account. Read the payload directly and
+# never scale these values.
+
+_ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_ANTHROPIC_USAGE_HEADERS: dict[str, str] = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "anthropic-beta": "oauth-2025-04-20",
+    "User-Agent": "claude-code/2.1.0",
+}
+_ANTHROPIC_OAUTH_ONLY_REASON = (
+    "Anthropic account limits are only available for OAuth-backed Claude accounts."
+)
+
+_anthropic_fallback_lock = threading.Lock()
+_anthropic_fallback_warned = False
+
+
+def _warn_anthropic_fallback_once() -> None:
+    """One warning per process when the direct Anthropic read is unavailable."""
+    global _anthropic_fallback_warned
+    with _anthropic_fallback_lock:
+        if _anthropic_fallback_warned:
+            return
+        _anthropic_fallback_warned = True
+    LOG.warning(
+        "usage-guard: the direct Anthropic usage read is unavailable; falling back to the host "
+        "fetcher, whose sub-1%% windows may be inflated (a 1%% week can read as 100%%)."
+    )
+
+
+def _snapshot_like(*, raw: Any = None, unavailable_reason: Optional[str] = None) -> Any:
+    """Snapshot-shaped object for the guard's own reads (see ``_snapshot_record``)."""
+    return SimpleNamespace(
+        fetched_at=_now_utc(), plan=None, unavailable_reason=unavailable_reason,
+        windows=(), raw=raw,
+    )
+
+
+def _anthropic_snapshot() -> Any:
+    """Read the Anthropic OAuth usage payload directly, at its published percentages.
+
+    Returns a snapshot-shaped object carrying the raw payload, so
+    ``_snapshot_record`` ingests every published window (classic weeks, the
+    ``limits[]`` array, model-scoped buckets) unscaled. The token is resolved
+    in-process through the host's credential resolver and is never logged,
+    stored or returned. Transport failures propagate so the poller's
+    rate-limit backoff and fail-closed policy apply unchanged.
+    """
+    try:
+        from agent.anthropic_credentials import _is_oauth_token, resolve_anthropic_token
+    except Exception:
+        return None
+    try:
+        token = (resolve_anthropic_token() or "").strip()
+    except Exception:
+        return None
+    if not token:
+        return None
+    try:
+        if not _is_oauth_token(token):
+            return _snapshot_like(unavailable_reason=_ANTHROPIC_OAUTH_ONLY_REASON)
+    except Exception:
+        pass
+    import httpx
+
+    headers = dict(_ANTHROPIC_USAGE_HEADERS)
+    headers["Authorization"] = f"Bearer {token}"
+    with httpx.Client(timeout=15.0) as client:
+        response = client.get(_ANTHROPIC_USAGE_URL, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    return _snapshot_like(raw=payload) if isinstance(payload, dict) else None
+
+
 def _spawn_poll_for_source(source_key: str, sync_timeout_s: float = 0.0) -> None:
-    """Best-effort: start one bounded fetch of core's fetcher.
+    """Best-effort: start one bounded fetch of the source's usage.
 
     The core import happens inside the worker thread — if the core module is
     absent the poll records ``fetch-error`` and the guard keeps its on-disk
     policy instead of crashing the request.
+
+    The Anthropic source is read directly (see ``_anthropic_snapshot``): the
+    host fetcher inflates any sub-1% window ×100. Every other source uses the
+    host fetcher.
 
     With ``sync_timeout_s`` > 0 the caller waits (bounded) for the fetch so a
     fail-closed decision can be made against fresh data rather than stale
@@ -763,6 +849,11 @@ def _spawn_poll_for_source(source_key: str, sync_timeout_s: float = 0.0) -> None
     """
 
     def _fetch() -> Any:
+        if source_key == "anthropic":
+            snapshot = _anthropic_snapshot()
+            if snapshot is not None:
+                return snapshot
+            _warn_anthropic_fallback_once()
         from agent.account_usage import fetch_account_usage as core_fetch
 
         return core_fetch(source_key)
