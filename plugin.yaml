@@ -1,10 +1,10 @@
 name: usage-guard
-version: 0.1.5
-description: "Usage-exhaustion guard: reads account usage into its own cache (core fetcher; a direct read for the Anthropic source, whose host parser inflates sub-1% windows) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
+version: 0.2.0
+description: "Usage-exhaustion guard: reads account usage into its own cache through Hermes's documented usage fetcher (no credential reaches the plugin) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
 kind: standalone
-requires_hermes: ">=0.21"
+requires_hermes: ">=0.21.6"
 provides_tools: []
 provides_hooks: []
 provides_middleware:

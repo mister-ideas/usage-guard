@@ -69,9 +69,11 @@ On Hermes builds that route auxiliary attempts through the middleware (a host-si
 
 ## Usage sources and scale
 
-**Sources.** Every usage number comes from Hermes itself: the core fetcher `agent.account_usage.fetch_account_usage` — which resolves each provider's own stored login — for `openai-codex` and `openrouter`, and a direct read of the provider's usage endpoint for the Anthropic source using the same login Hermes stores. No other plugin is imported, read or required (notably not `quota`); the guard's only cache is its own under `$HERMES_HOME/plugin-data/usage-guard/`.
+**Sources.** Every usage number comes from Hermes itself, through the documented `agent.account_usage.fetch_account_usage`, for every source including Anthropic. The core fetcher resolves each provider's stored sign-in and attaches it, so the plugin never holds a credential and never calls a usage endpoint itself. No other plugin is imported, read or required (notably not `quota`); the guard's only cache is its own under `$HERMES_HOME/plugin-data/usage-guard/`.
 
-**Scale.** Window values are percentages (0-100), per the host's `AccountUsageWindow.used_percent` contract, and the guard denies on a value outside that range instead of comparing it. A source that reports fractions (0-1) must be declared in `source_scales` — otherwise a full window would read as 1% used and never block. An undeclared source whose values are all ≤ 1 is logged once with that fix. The Anthropic source is read directly and is always percentages.
+**Anthropic caveat.** Upstream's Anthropic fetcher parses the OAuth usage payload with `fraction=True`, which multiplies any `utilization` ≤ 1 by 100 — and that payload's `utilization` is a percentage scale (its own `limits[]` reports the same windows as `percent`). A healthy sub-1% window therefore arrives inflated, and the guard can only report what the core reports: at `threshold_percent=100` a session reading exactly 1% becomes 100% and blocks. Repairing that belongs upstream; a plugin that read the endpoint itself would have to hold the user's token, which the catalog forbids. Whenever the host does provide a raw payload, the guard ingests every published window at its stated percentage.
+
+**Scale.** Window values are percentages (0-100), per the host's `AccountUsageWindow.used_percent` contract, and the guard denies on a value outside that range instead of comparing it. A source that reports fractions (0-1) must be declared in `source_scales` — otherwise a full window would read as 1% used and never block. An undeclared source whose values are all ≤ 1 is logged once with that fix.
 
 ## Rate limiting
 
@@ -128,13 +130,13 @@ The Anthropic source resolves the core Claude OAuth credential. A custom Claude 
 
 ## Provenance and limits
 
-The account-usage data comes from core's `agent.account_usage.fetch_account_usage`, except the Anthropic source, which the plugin reads directly (the host's parser multiplies any `utilization` ≤ 1 by 100, so a healthy 1% week would arrive as 100%); this plugin keeps its own cache under `$HERMES_HOME/plugin-data/usage-guard/` and stores only windows, timestamps, plan, and failure reasons — never credentials or raw payloads. Reads and merges are serialized with an advisory file lock (POSIX `flock` / Windows `locking`) so the desktop backend and a gateway sharing `HERMES_HOME` cannot lose each other's records.
+The account-usage data comes from core's documented `agent.account_usage.fetch_account_usage` for every source, Anthropic included; this plugin keeps its own cache under `$HERMES_HOME/plugin-data/usage-guard/` and stores only windows, timestamps, plan, and failure reasons — never credentials or raw payloads. Reads and merges are serialized with an advisory file lock (POSIX `flock` / Windows `locking`) so the desktop backend and a gateway sharing `HERMES_HOME` cannot lose each other's records.
 
 **Disclosures**
 
-- Network: one authenticated usage GET per refresh — `https://api.anthropic.com/api/oauth/usage` (Anthropic OAuth) and the Codex `wham/usage` endpoint on `chatgpt.com`. Both are **undocumented endpoints** and can change; a change fails closed (denials), never open. The plugin performs the Anthropic read itself, resolving the token in-process through the host's credential resolver; the token is never logged, stored or returned.
+- Network: the plugin makes **no** usage request of its own. Each refresh calls `agent.account_usage.fetch_account_usage`, which performs the authenticated read through Hermes (the Anthropic OAuth usage endpoint and the Codex `wham/usage` endpoint on `chatgpt.com`, both **undocumented upstream** and able to change). A changed or failing source fails closed (denials), never open.
 - Credential binding: the `llm_execution` middleware payload does not attest which credential/account a request will use, so the guard polls the account the core resolver returns and cannot prove it matches the request. With credential pools or per-session overrides, treat the reading as account-level evidence, not request-level.
-- Anthropic windows on stock Hermes: the plugin reads the Anthropic usage payload directly — the host's parser scales any `utilization` ≤ 1 by 100, which would read a healthy 1% week as 100% — so every published window is gated at its stated percentage: the classic session/weekly/model-scoped weeks and every `limits[]` entry. If that read is unavailable the guard falls back to the host fetcher and logs one warning (its classic windows only, and its sub-1% values may be inflated). Fail-closed either way.
+- Anthropic windows on stock Hermes: upstream's parser scales any `utilization` ≤ 1 by 100 while the payload is a percentage scale, so a sub-1% window arrives inflated (see the caveat above). The guard reads what the core reports and cannot repair it through the public API.
 - Not a billing guarantee: the plugin cannot revoke in-flight requests, govern other applications or direct CLI launches, enforce policy while unloaded, or predict the next request's cost from a quota percentage. Native list-price equivalent estimates are not actual subscription overage.
 
 ## Development

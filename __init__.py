@@ -13,9 +13,12 @@ decides on it; evidence that is stale, missing or malformed denies
 (fail-closed), so a long run never acts on usage information the guard could
 not confirm.
 
-The Anthropic source is read directly: the host's parser scales any utilization
-<= 1 by 100, so a healthy 1% week would arrive as 100% and the guard would refuse
-a healthy account. Refusal replies are marked
+Every source is read through the documented
+``agent.account_usage.fetch_account_usage``, so no credential reaches this plugin
+and no usage endpoint is called from here. Note that upstream's Anthropic parser
+scales any ``utilization`` <= 1 by 100 while that payload's values are
+percentages, so a sub-1% window arrives inflated and the guard cannot repair it
+from the public API. Refusal replies are marked
 usage_guard_blocked so host auxiliary paths reject them before provider dispatch.
 On stock Hermes this gates main-loop llm_execution dispatches, including MoA
 turns (the running preset's enabled slots are resolved and checked). Auxiliary
@@ -423,7 +426,6 @@ def _snapshot_record(snapshot: Any) -> dict[str, Any]:
         "unavailable_reason": reason if isinstance(reason, str) else None,
         "windows": windows,
         "codex_rate_blocked": codex_rate_blocked,
-        "raw_present": bool(getattr(snapshot, "raw", None)),
     }
 
 
@@ -497,7 +499,7 @@ def _failure_record(source_key: str, previous: dict[str, Any], exc: BaseExceptio
         "windows": list(previous.get("windows") or []),
         "fetched_at": previous.get("fetched_at"),
     }
-    for carried in ("codex_rate_blocked", "raw_present"):
+    for carried in ("codex_rate_blocked",):
         if carried in previous:
             record[carried] = previous[carried]
     status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -798,23 +800,6 @@ class _Decision:
         self.reason = reason
 
 
-_raw_warning_lock = threading.Lock()
-_raw_warning_shown = False
-
-
-def raw_warning_done() -> bool:
-    """True after the once-per-process raw-missing warning has been logged."""
-    global _raw_warning_shown
-    with _raw_warning_lock:
-        return _raw_warning_shown
-
-
-def _mark_raw_warning() -> None:
-    global _raw_warning_shown
-    with _raw_warning_lock:
-        _raw_warning_shown = True
-
-
 _undeclared_source_lock = threading.Lock()
 _undeclared_sources_warned: set[str] = set()
 
@@ -978,16 +963,6 @@ def _decide_provider(
                 or (reset is not None and _parse_ts(reset) is None)):
             return _Decision(False, "Usage guard: malformed allowance window; the request was not sent.", "invalid window")
 
-    if source_key == "anthropic" and not record.get("raw_present") and not raw_warning_done():
-        # The guard reads the Anthropic payload itself; a record without raw
-        # means that read was unavailable and the host fetcher was used, so only
-        # its classic windows are gated (and its sub-1% values may be inflated).
-        LOG.warning(
-            "usage-guard: the Anthropic usage snapshot has no raw payload (the direct read was "
-            "unavailable); only the host's classic windows are gated."
-        )
-        _mark_raw_warning()
-
     if source_key == "openai-codex" and record.get("codex_rate_blocked") is True:
         return _Decision(False, "Usage guard: Codex reports a blocked or reached limit; the request was not sent.", "Codex server limit")
 
@@ -1015,86 +990,6 @@ def _decide_provider(
         f"{header} {_EXHAUSTED_NOTICE.format(windows=windows_txt)}",
         reason=windows_txt,
     )
-
-
-# ── anthropic usage read ─────────────────────────────────────────────────────
-# The host's Anthropic fetcher parses the OAuth usage payload with
-# ``fraction=True``: any ``utilization`` <= 1 is multiplied by 100. That payload
-# is a percentage scale — its own ``limits[]`` array reports the same windows as
-# ``percent`` (session 4, weekly_all 1) — so a healthy 1% week arrives as 100%
-# and the guard would refuse a healthy account. Read the payload directly and
-# never scale these values.
-
-_ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-_ANTHROPIC_USAGE_HEADERS: dict[str, str] = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "anthropic-beta": "oauth-2025-04-20",
-    "User-Agent": "claude-code/2.1.0",
-}
-_ANTHROPIC_OAUTH_ONLY_REASON = (
-    "Anthropic account limits are only available for OAuth-backed Claude accounts."
-)
-
-_anthropic_fallback_lock = threading.Lock()
-_anthropic_fallback_warned = False
-
-
-def _warn_anthropic_fallback_once() -> None:
-    """One warning per process when the direct Anthropic read is unavailable."""
-    global _anthropic_fallback_warned
-    with _anthropic_fallback_lock:
-        if _anthropic_fallback_warned:
-            return
-        _anthropic_fallback_warned = True
-    LOG.warning(
-        "usage-guard: the direct Anthropic usage read is unavailable; falling back to the host "
-        "fetcher, whose sub-1%% windows may be inflated (a 1%% week can read as 100%%)."
-    )
-
-
-def _snapshot_like(*, raw: Any = None, unavailable_reason: Optional[str] = None) -> Any:
-    """Snapshot-shaped object for the guard's own reads (see ``_snapshot_record``)."""
-    return SimpleNamespace(
-        fetched_at=_now_utc(), plan=None, unavailable_reason=unavailable_reason,
-        windows=(), raw=raw,
-    )
-
-
-def _anthropic_snapshot() -> Any:
-    """Read the Anthropic OAuth usage payload directly, at its published percentages.
-
-    Returns a snapshot-shaped object carrying the raw payload, so
-    ``_snapshot_record`` ingests every published window (classic weeks, the
-    ``limits[]`` array, model-scoped buckets) unscaled. The token is resolved
-    in-process through the host's credential resolver and is never logged,
-    stored or returned. Transport failures propagate so the poller's
-    rate-limit backoff and fail-closed policy apply unchanged.
-    """
-    try:
-        from agent.anthropic_credentials import _is_oauth_token, resolve_anthropic_token
-    except Exception:
-        return None
-    try:
-        token = (resolve_anthropic_token() or "").strip()
-    except Exception:
-        return None
-    if not token:
-        return None
-    try:
-        if not _is_oauth_token(token):
-            return _snapshot_like(unavailable_reason=_ANTHROPIC_OAUTH_ONLY_REASON)
-    except Exception:
-        pass
-    import httpx
-
-    headers = dict(_ANTHROPIC_USAGE_HEADERS)
-    headers["Authorization"] = f"Bearer {token}"
-    with httpx.Client(timeout=15.0) as client:
-        response = client.get(_ANTHROPIC_USAGE_URL, headers=headers)
-        response.raise_for_status()
-        payload = response.json()
-    return _snapshot_like(raw=payload) if isinstance(payload, dict) else None
 
 
 def _claim_fetch_slot(source_key: str, min_interval_s: float) -> bool:
@@ -1195,11 +1090,9 @@ def _spawn_poll_for_source(
     """
 
     def _fetch() -> Any:
-        if source_key == "anthropic":
-            snapshot = _anthropic_snapshot()
-            if snapshot is not None:
-                return snapshot
-            _warn_anthropic_fallback_once()
+        # Every source, including anthropic, goes through Hermes's own usage
+        # route: the core fetcher resolves the provider's stored sign-in and
+        # attaches it itself, so the plugin never holds a credential.
         from agent.account_usage import fetch_account_usage as core_fetch
 
         return core_fetch(source_key)
@@ -1217,11 +1110,66 @@ def _spawn_poll_for_source(
 
 # ── MoA (virtual provider) slots ────────────────────────────────────────────
 
-def _normalize_moa_config(moa_raw: Any) -> Any:
-    """Core's MoA normalizer, imported lazily so the guard never vendors a copy."""
-    from hermes_cli.moa_config import normalize_moa_config
+# The slots a MoA turn fans out to when the preset names none. These mirror the
+# defaults Hermes applies to an unconfigured preset; the host-contract test
+# asserts they still match the core's own constants.
+_MOA_DEFAULT_REFERENCE_MODELS: tuple[dict[str, str], ...] = (
+    {"provider": "openai-codex", "model": "gpt-5.5"},
+    {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
+)
+_MOA_DEFAULT_AGGREGATOR: dict[str, str] = {
+    "provider": "openrouter", "model": "anthropic/claude-opus-4.8"}
 
-    return normalize_moa_config(moa_raw or {})
+
+def _moa_clean_slot(slot: Any, *, include_enabled: bool = False) -> Optional[dict[str, Any]]:
+    """A provider slot in the host's shape, or None when it is not one."""
+    if not isinstance(slot, dict):
+        return None
+    provider = str(slot.get("provider") or "").strip()
+    if not provider:
+        return None
+    clean: dict[str, Any] = {"provider": provider, "model": str(slot.get("model") or "").strip()}
+    if include_enabled:
+        clean["enabled"] = slot.get("enabled", True) is not False
+    return clean
+
+
+def _moa_normalize_preset(raw: Any) -> dict[str, Any]:
+    """One preset in the shape ``_moa_slot_providers`` reads."""
+    if not isinstance(raw, dict):
+        raw = {}
+    slots = [slot for slot in (_moa_clean_slot(item, include_enabled=True)
+                               for item in (raw.get("reference_models") or [])) if slot]
+    aggregator = _moa_clean_slot(raw.get("aggregator"))
+    return {
+        "enabled": raw.get("enabled", True) is not False,
+        "reference_models": slots or [dict(slot, enabled=True) for slot in _MOA_DEFAULT_REFERENCE_MODELS],
+        "aggregator": aggregator or dict(_MOA_DEFAULT_AGGREGATOR),
+    }
+
+
+def _normalize_moa_config(moa_raw: Any) -> dict[str, Any]:
+    """Validate a raw ``moa`` config into ``{presets, default_preset}``.
+
+    Implemented from the host's documented semantics rather than importing the
+    core's own normalizer, so the guard reaches Hermes only through surfaces a
+    plugin is allowed to use.
+    """
+    if not isinstance(moa_raw, dict):
+        moa_raw = {}
+    presets_raw = moa_raw.get("presets")
+    presets: dict[str, dict[str, Any]] = {}
+    if isinstance(presets_raw, dict):
+        for name, preset in presets_raw.items():
+            clean_name = str(name or "").strip()
+            if clean_name:
+                presets[clean_name] = _moa_normalize_preset(preset)
+    if not presets:
+        presets["default"] = _moa_normalize_preset(moa_raw)
+    default_name = str(moa_raw.get("default_preset") or "").strip()
+    if not default_name or default_name not in presets:
+        default_name = next(iter(presets))
+    return {"default_preset": default_name, "presets": presets}
 
 
 def _moa_slot_providers(moa_raw: Any, model: Any) -> Optional[tuple[str, list[str]]]:
