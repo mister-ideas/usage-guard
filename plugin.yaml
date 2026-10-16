@@ -1,5 +1,5 @@
 name: usage-guard
-version: 0.2.1
+version: 0.2.2
 description: "Usage-exhaustion guard: reads account usage into its own cache through Hermes's documented usage fetcher (no credential reaches the plugin) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
