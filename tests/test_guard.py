@@ -829,10 +829,15 @@ def test_concurrent_callers_collapse_into_one_read(guard, tmp_path, monkeypatch)
 
     def spy(source_key, fetcher, sync_timeout_s=0.0):
         reads.append(source_key)
-        time.sleep(0.25)   # keep the read in flight while the peers arrive
+        time.sleep(0.2)   # hold the read open so the peers reach the claim
+        now = guard._now_utc().isoformat()
+        # Mirror the poller exactly: it stamps last_attempt_at when a read
+        # finishes, and that stamp is what keeps the interval floor in force for
+        # every other caller. A spy that replaced the record without it would
+        # let a late caller claim a second read.
         guard._merge_into_cache(source_key, {
-            "ok": True, "windows": [], "fetched_at": guard._now_utc().isoformat(),
-            "polled_at": guard._now_utc().isoformat()})
+            "ok": True, "windows": [], "fetched_at": now,
+            "polled_at": now, "last_attempt_at": now})
 
     def worker():
         barrier.wait(timeout=5)
