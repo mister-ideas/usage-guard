@@ -49,9 +49,20 @@ DEFAULT_PROVIDER_SOURCES: dict[str, str] = {
     "openai-codex": "openai-codex",
 }
 
+# data-source key -> value scale. The host contract for
+# ``AccountUsageWindow.used_percent`` is a percentage (its producers clamp to
+# 0-100). A source that reports 0-1 fractions must be declared here, or a full
+# window (1.0) would read as 1% and never block.
+DEFAULT_SOURCE_SCALES: dict[str, str] = {
+    "anthropic": "percent",
+    "openai-codex": "percent",
+    "openrouter": "percent",
+}
+
 DEFAULTS: dict[str, Any] = {
     "provider_keys": list(DEFAULT_PROVIDER_KEYS),
     "provider_sources": dict(DEFAULT_PROVIDER_SOURCES),
+    "source_scales": dict(DEFAULT_SOURCE_SCALES),
     # Deny when ANY window's used_percent >= threshold (100 = fully used).
     # 100 = the only blocking point is the subscription limit itself (0% left);
     # extra usage may stay enabled on the accounts.
@@ -517,6 +528,20 @@ def _clean_sources(value: Any) -> Optional[dict[str, str]]:
     return sources
 
 
+def _clean_scales(value: Any) -> Optional[dict[str, str]]:
+    """Validate ``source_scales``: data-source key -> 'percent' | 'fraction'."""
+    if not isinstance(value, dict):
+        return None
+    scales: dict[str, str] = {}
+    for key, scale in value.items():
+        if not isinstance(key, str) or not key:
+            return None
+        if scale not in ("percent", "fraction"):
+            return None
+        scales[key] = scale
+    return scales
+
+
 def _threshold(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -555,6 +580,14 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
             LOG.warning("usage-guard: malformed provider_sources %r; using default", raw_sources)
         else:
             settings["provider_sources"] = sources
+
+        raw_scales = get_config("source_scales", DEFAULT_SOURCE_SCALES)
+        scales = _clean_scales(raw_scales)
+        if scales is None:
+            config_ok = False
+            LOG.warning("usage-guard: malformed source_scales %r; using default", raw_scales)
+        else:
+            settings["source_scales"] = scales
 
         threshold = _threshold(get_config("threshold_percent", DEFAULTS["threshold_percent"]))
         if threshold is None:
@@ -624,6 +657,65 @@ def _mark_raw_warning() -> None:
     global _raw_warning_shown
     with _raw_warning_lock:
         _raw_warning_shown = True
+
+
+_undeclared_source_lock = threading.Lock()
+_undeclared_sources_warned: set[str] = set()
+
+
+def _warn_undeclared_source_once(source_key: str, record: Any) -> None:
+    """Flag an unclassified source whose values look like fractions (0-1).
+
+    ``used_percent`` is a percentage per the host contract, so 1.0 means 1% used;
+    a source that actually reports fractions would read a full window as 1% and
+    never block. Only sources absent from ``source_scales`` are flagged, and only
+    when every window value is <= 1 — a genuine idle account is indistinguishable,
+    so this is a warning, not a denial.
+    """
+    windows = record.get("windows") if isinstance(record, dict) else None
+    if not isinstance(windows, list) or not windows:
+        return
+    values: list[float] = []
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_percent")
+        if isinstance(used, (int, float)) and not isinstance(used, bool) and math.isfinite(used):
+            values.append(float(used))
+    if not values or any(value > 1.0 for value in values):
+        return
+    with _undeclared_source_lock:
+        if source_key in _undeclared_sources_warned:
+            return
+        _undeclared_sources_warned.add(source_key)
+    LOG.warning(
+        "usage-guard: source %s is not declared in source_scales and reports only values <= 1; "
+        "they are read as percentages (1.0 = 1%% used). If this source reports fractions, "
+        "declare it in source_scales as 'fraction'.",
+        source_key,
+    )
+
+
+def _scaled_record(record: Optional[dict[str, Any]], scale: str) -> Optional[dict[str, Any]]:
+    """Copy a record with every window normalized to the guard's percentage scale.
+
+    ``percent`` (the host contract) passes through untouched; ``fraction`` scales
+    0-1 values by 100. Non-numeric values are left for the window validator to
+    reject, so a malformed source can never be silently compared.
+    """
+    if not isinstance(record, dict) or scale != "fraction":
+        return record
+    windows = record.get("windows")
+    if not isinstance(windows, list):
+        return record
+    scaled: list[Any] = []
+    for window in windows:
+        if isinstance(window, dict):
+            used = window.get("used_percent")
+            if isinstance(used, (int, float)) and not isinstance(used, bool) and math.isfinite(used):
+                window = {**window, "used_percent": float(used) * 100.0}
+        scaled.append(window)
+    return {**record, "windows": scaled}
 
 
 def _decide_provider(
@@ -699,6 +791,14 @@ def _decide_provider(
             reason=str(record.get("unavailable_reason")),
         )
 
+    # Normalize to the guard's percentage scale before validating: the host
+    # contract is a percentage, a declared fractional source is scaled ×100, and
+    # an out-of-range result denies below instead of being compared.
+    source_scale = settings["source_scales"].get(source_key, "percent")
+    if source_key not in settings["source_scales"]:
+        _warn_undeclared_source_once(source_key, record)
+    record = _scaled_record(record, source_scale)
+
     windows = record.get("windows")
     if record.get("ok") is not True or not isinstance(windows, list) or not windows:
         return _Decision(False, "Usage guard: usable allowance evidence is missing; the request was not sent.", "invalid allowance evidence")
@@ -708,7 +808,7 @@ def _decide_provider(
         used = window.get("used_percent")
         reset = window.get("reset_at")
         if (isinstance(used, bool) or not isinstance(used, (int, float))
-                or not math.isfinite(used) or used < 0
+                or not math.isfinite(used) or used < 0 or used > 100
                 or (reset is not None and _parse_ts(reset) is None)):
             return _Decision(False, "Usage guard: malformed allowance window; the request was not sent.", "invalid window")
 
