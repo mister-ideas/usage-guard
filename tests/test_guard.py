@@ -160,8 +160,8 @@ def test_cache_path_uses_the_plugin_data_dir(guard):
     pkg = types.ModuleType("plugins")
     pkg.__path__ = []
     with patch.dict(sys.modules, {"plugins": pkg, "plugins.plugin_storage": fake}):
-        assert guard._cache_path() == os.path.join(
-            "/profile-home/plugin-data", "usage-guard", "usage.json")
+        assert guard._cache_path() == str(
+            Path("/profile-home/plugin-data") / "usage-guard" / "usage.json")
     assert seen == ["usage-guard"]
 
 
