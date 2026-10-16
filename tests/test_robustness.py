@@ -1,5 +1,5 @@
-"""TDD batch 2: dead-branch removal (m1), Codex ISO resets (m2), cache locking
-(M4), 429 backoff (M1), and polled_at refresh confirmation (m4)."""
+"""Offline tests for the guard's hard edges: window and reset handling, cache
+locking under concurrency, and the rate-limit and refresh policy."""
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -30,7 +30,7 @@ def invoke(guard, record, provider="anthropic", **settings):
     return out, calls
 
 
-# ── m1: _exhausted_windows reports past-reset exhausted windows ──────────────
+# ── _exhausted_windows reports past-reset exhausted windows ──────────────────
 
 def test_exhausted_windows_includes_past_reset_window(guard):
     past = (NOW - timedelta(seconds=5)).isoformat()
@@ -39,7 +39,7 @@ def test_exhausted_windows_includes_past_reset_window(guard):
     assert len(hits) == 1
 
 
-# ── m2: Codex reset_at accepts ISO strings as well as unix seconds ───────────
+# ── Codex reset_at accepts ISO strings as well as unix seconds ───────────────
 
 def test_codex_iso_reset_at_is_accepted(guard):
     raw = {"rate_limit": {"allowed": True, "limit_reached": False,
@@ -52,7 +52,7 @@ def test_codex_iso_reset_at_is_accepted(guard):
     assert any(w["label"].startswith("codex:rate_limit") for w in out["windows"])
 
 
-# ── M4: locked, unique-tmp cache updates must not lose concurrent writers ────
+# ── locked, unique-tmp cache updates must not lose concurrent writers ────────
 
 def test_concurrent_cache_updates_preserve_all_providers(guard, tmp_path):
     path = str(tmp_path / "usage.json")
@@ -94,7 +94,7 @@ def test_no_fixed_tmp_collision(guard, tmp_path):
     assert len(seen) == 2
 
 
-# ── M1: usage-endpoint 429 → bounded backoff that DENIES (fail-closed) ───────
+# ── usage-endpoint 429 → bounded backoff that never refuses on its own ───────
 
 class FakeRateLimit(Exception):
     def __init__(self):

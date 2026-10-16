@@ -79,10 +79,9 @@ jobs:
 
       - name: Clone pinned Hermes revision
         run: |
-          # Pinned to an exact commit (verified to exist upstream). Bump
-          # deliberately in the same PR as requires_hermes. A plain v0.21.5
-          # tag does not exist upstream (only rc.* pre-releases), so a tag
-          # fallback would silently clone unpinned main — do not add one.
+          # Pinned to an exact commit: bump it deliberately in the same PR as
+          # requires_hermes. Do not add a tag fallback — a tag that resolves
+          # differently upstream would silently clone unpinned main.
           git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git /tmp/core
           git -C /tmp/core checkout 2a17f1648659978cb64b7e93451bff37a85c61be
           echo "HERMES_CORE=/tmp/core" >> "$GITHUB_ENV"

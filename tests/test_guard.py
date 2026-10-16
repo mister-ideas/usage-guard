@@ -108,7 +108,7 @@ def test_fail_open_allows_unavailable(guard):
     assert calls == [{}]
 
 
-# ── stale data and refresh confirmation ─────────────────────────────────────
+# ── stale data and the refresh policy ─────────────────────────────────────
 
 def test_stale_snapshot_denies_fail_closed(guard):
     old = (NOW - timedelta(seconds=61)).isoformat()
@@ -117,7 +117,7 @@ def test_stale_snapshot_denies_fail_closed(guard):
 
 
 def test_stale_snapshot_denies_when_poll_times_out(guard):
-    """No refresh lands: the stale path must deny, never dispatch on old data."""
+    """No refresh lands and no read failure is recorded: the stale path denies."""
     old = (NOW - timedelta(seconds=61)).isoformat()
     rec = make_record(10, fetched_at=old, polled_at=old)
     with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": rec}}), \
@@ -266,10 +266,10 @@ def test_stock_defaults_are_setup_agnostic(guard):
     assert guard.DEFAULTS["provider_sources"] == {"anthropic": "anthropic", "openai-codex": "openai-codex"}
     assert guard.DEFAULTS["threshold_percent"] == 100.0
     assert guard.DEFAULTS["fail_open"] is False
-    assert "refresh_every_request" not in guard.DEFAULTS  # per-request refresh was removed
+    assert "refresh_every_request" not in guard.DEFAULTS
 
 
-# M4: lock deadline must be enforceable (LOCK_NB retry), never block forever.
+# The lock deadline must be enforceable (LOCK_NB retry), never block forever.
 
 @pytest.mark.skipif(os.name == "nt", reason="posix advisory-lock timeout semantics")
 def test_lock_timeout_is_enforced(guard, tmp_path):
@@ -369,7 +369,7 @@ def test_inactive_limit_is_still_gated(guard):
 
 
 def test_fraction_scale_percent_is_gateable(guard):
-    """Live limits[].percent is 0-100 (verified 2026-10-05); 0.5% is legitimate."""
+    """The live limits[].percent scale is 0-100; 0.5% is legitimate."""
     raw = {"limits": [{"kind": "session", "percent": 0.5, "is_active": True}]}
     rec = guard._snapshot_record(snapshot_like(raw))
     out, calls = invoke(guard, rec, threshold_percent=100)
@@ -576,7 +576,7 @@ def test_anthropic_limits_array_is_gated(guard):
 
 
 def test_anthropic_healthy_week_passes_the_gate(guard):
-    """Regression: a 1% week must not block (the host reports it as 100%)."""
+    """A healthy 1% week must not block, even though the host reports it as 100%."""
     _, calls = invoke(guard, anthropic_record(guard))
     assert calls == [{}]
 
