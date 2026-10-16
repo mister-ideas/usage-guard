@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4 — 2026-10-16
+
+Documentation and test only: the README, the changelog and the dependency test no longer name another plugin. They state the invariant instead — the guard depends on nothing beyond Hermes's own documented surfaces — and the test parses the module's imports and asserts the exact allowlist (the standard library plus `agent.account_usage`, `hermes_cli.config` and `plugins.plugin_storage`) rather than grepping for a name. No plugin behavior changed.
+
 ## 0.2.3 — 2026-10-16
 
 Repository hygiene only: `plugin-data/` joins the other cache directories in `.gitignore`, so running the plugin with `HERMES_HOME` pointed at a clone cannot leave an untracked cache directory. No plugin code changed.
@@ -72,7 +76,7 @@ Full scale pass over every usage value the guard ingests, and an explicit statem
 
 ### Provenance
 
-- Usage sources are Hermes' own providers: the core fetcher for `openai-codex`/`openrouter` and a direct read for the Anthropic source, both using the logins Hermes already stores. No other plugin (notably not `quota`) is imported, read or required, and the guard's only cache is its own.
+- Usage sources are Hermes' own providers: the core fetcher for `openai-codex`/`openrouter` and a direct read for the Anthropic source, both using the logins Hermes already stores. Nothing outside Hermes is imported, read or required, and the guard's only cache is its own.
 
 ## 0.1.1 — 2026-10-16
 

@@ -923,13 +923,28 @@ def test_malformed_source_min_intervals_deny(guard):
     assert out.usage_guard_blocked is True
 
 
-def test_no_other_plugin_is_used_as_a_usage_source(guard):
-    """Usage comes from Hermes' own providers; no plugin (e.g. quota) is read."""
+def test_the_plugin_depends_only_on_hermes_public_surfaces(guard):
+    """Its imports are the standard library plus Hermes's documented modules: no
+    third-party package, no other plugin, and no read outside its own data dir."""
+    import ast
     from pathlib import Path
-    src = Path(guard.__file__).read_text(encoding="utf-8")
-    assert "import quota" not in src
-    assert "quota_cache" not in src
-    assert ".hermes/plugins" not in src and "plugins/quota" not in src
-    assert "plugin-data/usage-guard" in src or "_CACHE_DIRNAME" in src
-    assert "agent.account_usage" in src
-    assert "agent.anthropic_credentials" not in src  # no credential route in the plugin
+
+    source = Path(guard.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.add(node.module.split(".")[0])
+    hermes = {"agent", "hermes_cli", "plugins"}
+    stdlib = {
+        "__future__", "contextlib", "datetime", "fcntl", "json", "logging", "math",
+        "msvcrt", "os", "threading", "time", "types", "typing", "uuid",
+    }
+    assert modules <= hermes | stdlib, sorted(modules - (hermes | stdlib))
+    assert modules & hermes == hermes  # every Hermes surface it uses is the documented one
+    assert "agent.account_usage" in source and "hermes_cli.config" in source
+    assert "plugins.plugin_storage" in source
+    assert "agent.anthropic_credentials" not in source  # no credential route in the plugin
+    assert "plugin-data/usage-guard" in source or "_CACHE_DIRNAME" in source
