@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/mister-ideas/usage-guard/security/advisories/new
+    about: Report a vulnerability privately. Never open a public issue for a security problem.
+  - name: Question or idea
+    url: https://github.com/mister-ideas/usage-guard/discussions
+    about: Ask how something works, or discuss an idea before writing a feature request.
+  - name: Hermes Agent itself
+    url: https://github.com/NousResearch/hermes-agent/issues
+    about: Problems with Hermes (not this plugin) belong in the Hermes repository.

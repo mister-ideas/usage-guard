@@ -1,5 +1,9 @@
 # usage-guard
 
+[![CI](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mister-ideas/usage-guard)](https://github.com/mister-ideas/usage-guard/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Author: **mister-ideas**. MIT-licensed Hermes native plugin.
 
 ## Policy
@@ -157,6 +161,16 @@ HERMES_CORE=/path/to/hermes-agent python -m pytest tests/test_host_contract.py -
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Changelog: [CHANGELOG.md](CHANGELOG.md).
+
+## Support, issues and releases
+
+- Bugs and feature requests: the [issue forms](https://github.com/mister-ideas/usage-guard/issues/new/choose). The bug form asks for the refusal notice, your versions and the `plugins.usage-guard` log lines — that evidence is what makes a report reproducible.
+- Questions and ideas: [Discussions](https://github.com/mister-ideas/usage-guard/discussions).
+- Security: [SECURITY.md](SECURITY.md) — reported privately, never in a public issue.
+- Community expectations: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) — what is in and out of scope, and how releases are cut.
+
+Releases are SemVer tags with a GitHub Release whose zip the release workflow builds only after the suite passes. There is no fixed cadence: fixes ship when they are ready. The Hermes plugin catalog pins an exact commit SHA, and moving that pin is a reviewed pull request against `NousResearch/hermes-agent`, so catalog users only ever receive reviewed code.
 
 ## License
 

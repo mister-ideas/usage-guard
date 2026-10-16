@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5 — 2026-10-16
+
+Open-source readiness: a Contributor Covenant code of conduct, a feature-request form, issue-template configuration (blank issues off, with pointers to private security reporting and Discussions), Dependabot for the workflow actions, README badges, and a CONTRIBUTING guide that documents scope, the pull-request process and the release policy. No plugin code changed.
+
 ## 0.2.4 — 2026-10-16
 
 Documentation and test only: the README, the changelog and the dependency test no longer name another plugin. They state the invariant instead — the guard depends on nothing beyond Hermes's own documented surfaces — and the test parses the module's imports and asserts the exact allowlist (the standard library plus `agent.account_usage`, `hermes_cli.config` and `plugins.plugin_storage`) rather than grepping for a name. No plugin behavior changed.
