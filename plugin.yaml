@@ -1,6 +1,6 @@
 name: usage-guard
-version: 0.1.2
-description: "Usage-exhaustion guard: reads account usage into its own cache (core fetcher; a direct read for the Anthropic source, whose host parser inflates sub-1% windows) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; configurable stale-data policy (fail-closed by default)."
+version: 0.1.3
+description: "Usage-exhaustion guard: reads account usage into its own cache (core fetcher; a direct read for the Anthropic source, whose host parser inflates sub-1% windows) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
 kind: standalone
@@ -22,6 +22,14 @@ config_schema:
     type: dict
     default: {"anthropic": "percent", "openai-codex": "percent", "openrouter": "percent"}
     description: "data-source key -> value scale: 'percent' (0-100, the host contract) or 'fraction' (0-1, scaled x100); undeclared sources are read as percentages and logged once"
+  min_fetch_interval_s:
+    type: float
+    default: 30.0
+    description: "Hard floor between two network reads of one source (enforced across processes); prevents the usage endpoint from rate-limiting the guard. 0 disables"
+  stale_grace_s:
+    type: float
+    default: 900.0
+    description: "While a refresh is failing or rate-limited, keep deciding on the last good snapshot for up to this long instead of refusing. 0 restores the strict stale policy"
   threshold_percent:
     type: float
     default: 100.0

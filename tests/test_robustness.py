@@ -115,9 +115,18 @@ def test_poll_429_records_backoff(guard):
     assert cached.get("backoff_until")
 
 
-def test_backoff_until_denies(guard):
+def test_backoff_alone_never_denies_with_recent_evidence(guard):
+    """A 429 suppresses new reads; it must not refuse a request by itself."""
     future = (NOW + timedelta(seconds=120)).isoformat()
-    out, calls = invoke(guard, rec(backoff_until=future))
+    _, calls = invoke(guard, rec(backoff_until=future))
+    assert calls == [{}]
+
+
+def test_backoff_without_usable_evidence_denies(guard):
+    """No evidence and a rejected refresh: fail-closed still refuses."""
+    future = (NOW + timedelta(seconds=120)).isoformat()
+    out, calls = invoke(guard, rec(windows=[], fetched_at=None, backoff_until=future,
+                                   unavailable_reason="fetch-error"))
     assert calls == []
     assert out.usage_guard_blocked is True
 

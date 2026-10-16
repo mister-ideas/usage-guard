@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 — 2026-10-16
+
+Rate limiting no longer refuses requests.
+
+### Guard behavior
+
+- A failed or rate-limited refresh (HTTP 429) no longer erases the last good snapshot: its windows and timestamp are carried forward, so a rate limit can never leave the guard with no evidence.
+- A backoff alone never refuses a request. While the usage endpoint is rate-limiting or failing, the guard keeps deciding on the last snapshot it read, for up to `stale_grace_s` (default 900s), and the exhaustion interlock still applies to that snapshot — a genuinely exhausted window still blocks. Set `stale_grace_s: 0` for the previous strict behaviour.
+- `min_fetch_interval_s` (new, default 30s): a hard floor between two network reads of one source, enforced across processes through the cache, so a burst of guarded ingresses (main turn, auxiliary calls, MoA slots, subagents) can never become a burst of usage-endpoint requests. This is what prevents the 429s rather than reacting to them.
+- Backoff now honours `Retry-After`, grows exponentially with consecutive failures, is capped at 900s, and carries jitter so the desktop backend and the gateway do not retry in lockstep.
+- With `refresh_every_request: true`, an unconfirmed refresh only refuses when no usable evidence remains; it no longer refuses merely because the endpoint declined to answer.
+
 ## 0.1.2 — 2026-10-16
 
 Full scale pass over every usage value the guard ingests, and an explicit statement that the usage sources are Hermes' own providers.

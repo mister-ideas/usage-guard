@@ -73,6 +73,14 @@ On Hermes builds that route auxiliary attempts through the middleware (a host-si
 
 **Scale.** Window values are percentages (0-100), per the host's `AccountUsageWindow.used_percent` contract, and the guard denies on a value outside that range instead of comparing it. A source that reports fractions (0-1) must be declared in `source_scales` — otherwise a full window would read as 1% used and never block. An undeclared source whose values are all ≤ 1 is logged once with that fix. The Anthropic source is read directly and is always percentages.
 
+## Rate limiting
+
+A usage endpoint that rate-limits or fails must not become a refusal, because that would make the guard the outage. Three rules:
+
+- **A failed refresh never erases evidence.** The last good windows and their timestamp are carried forward, so a 429 can never leave the guard with "no data".
+- **A backoff never refuses a request by itself.** While the endpoint is rate-limiting, the guard keeps deciding on the last snapshot it read for up to `stale_grace_s` (default 900s), and the exhaustion interlock applies to that snapshot unchanged — a genuinely exhausted window still blocks. Beyond the grace window, the normal stale-data policy applies.
+- **The request rate is capped.** `min_fetch_interval_s` (default 30s) is a hard floor between two network reads of one source, enforced across processes through the cache, so a burst of guarded ingresses (main turn, auxiliary calls, MoA slots, subagents) can never become a burst of endpoint requests. Backoff honours `Retry-After`, grows exponentially with consecutive failures, and carries jitter so the desktop backend and the gateway do not retry in lockstep.
+
 ## Configuration
 
 Use Hermes' supported settings CLI/UI. Keys are under `plugins.entries.usage-guard.settings`:
@@ -87,6 +95,8 @@ Use Hermes' supported settings CLI/UI. Keys are under `plugins.entries.usage-gua
 | `refresh_every_request` | `true` | Require new evidence per guarded ingress |
 | `fail_open` | `false` | Keep false for safety |
 | `source_scales` | `{"anthropic": "percent", "openai-codex": "percent", "openrouter": "percent"}` | data-source key → value scale: `percent` (0-100) or `fraction` (0-1, scaled ×100 at decision time) |
+| `stale_grace_s` | `900` | While a refresh is failing or rate-limited, keep deciding on the last good snapshot for up to this long instead of refusing. `0` restores the strict stale policy |
+| `min_fetch_interval_s` | `30` | Hard floor between two network reads of one source, enforced across processes. Prevents the usage endpoint from rate-limiting the guard. `0` disables |
 
 Custom provider plugins are gated by adding their IDs, e.g.:
 
