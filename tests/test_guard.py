@@ -409,7 +409,7 @@ def test_write_failure_is_contained(guard, tmp_path):
 
 def test_manifest_declares_only_middleware():
     import yaml
-    manifest = yaml.safe_load(_root().joinpath("plugin.yaml").read_text())
+    manifest = yaml.safe_load(_root().joinpath("plugin.yaml").read_text(encoding="utf-8"))
     assert manifest["name"] == "usage-guard"
     assert manifest["provides_middleware"] == ["llm_execution"]
     assert manifest["provides_tools"] == [] and manifest["provides_hooks"] == []
@@ -703,7 +703,7 @@ def test_malformed_source_scales_deny(guard):
 def test_no_other_plugin_is_used_as_a_usage_source(guard):
     """Usage comes from Hermes' own providers; no plugin (e.g. quota) is read."""
     from pathlib import Path
-    src = Path(guard.__file__).read_text()
+    src = Path(guard.__file__).read_text(encoding="utf-8")
     assert "import quota" not in src
     assert "quota_cache" not in src
     assert ".hermes/plugins" not in src and "plugins/quota" not in src

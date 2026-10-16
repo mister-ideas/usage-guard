@@ -122,3 +122,14 @@ jobs:
           if grep -RniE '/Users/|/home/[a-z]|C:\\\\Users|\.cursor' --include='*.py' --include='*.js' --include='*.mjs' --include='*.yaml' --include='*.md' . --exclude-dir=.git; then
             echo "::error::Personal, setup-specific or forbidden-dependency identifiers found"; exit 1
           fi
+
+      - name: Text reads must declare an encoding
+        run: |
+          # The windows-latest matrix leg defaults to cp1252, so a bare
+          # read_text()/read() raises UnicodeDecodeError on the first non-ASCII
+          # byte in the repo (the sources use box-drawing section rules and the
+          # block notice carries an emoji). Always pass encoding="utf-8".
+          # Static repo grep only — no untrusted input is interpolated here.
+          if grep -rnE "\.read_text\(\)|open\([^)]*\)\.read\(\)" --include='*.py' . --exclude-dir=.git; then
+            echo "::error::read text files with encoding=\"utf-8\""; exit 1
+          fi
