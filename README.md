@@ -119,7 +119,7 @@ Not gated on stock Hermes (observer-only upstream hooks; this plugin does not pa
 
 To keep auxiliary work off a guarded provider today, point the task at another provider with the stock `auxiliary.<task>` settings (for example `auxiliary.compression`, `auxiliary.title_generation`). Auxiliary calls that run inside a turn are followed by a main-loop request, which the guard can still refuse; the uncovered case is auxiliary work with no turn (cron, idle gateway work).
 
-Closing the gap needs a Hermes change: an opt-in `auxiliary_execution` middleware kind, proposed in [NousResearch/hermes-agent#140694](https://github.com/NousResearch/hermes-agent/pull/140694) (open, not in any release yet). On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
+**Draft, not yet released:** once the Hermes change below ships, the guard registers `auxiliary_execution` on hosts that have it and applies the same decision to auxiliary attempts. Closing the gap needs a Hermes change: an opt-in `auxiliary_execution` middleware kind, proposed in [NousResearch/hermes-agent#140694](https://github.com/NousResearch/hermes-agent/pull/140694) (open, not in any release yet). On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
 
 ## Near the wall (v0.3.0)
 
