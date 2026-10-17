@@ -477,12 +477,30 @@ def test_write_failure_is_contained(guard, tmp_path):
     guard._write_cache({"providers": {}}, path=str(blocker / "usage.json"))  # dir is a file: must not raise
 
 
-def test_manifest_declares_only_middleware():
+def test_manifest_declares_exactly_what_register_adds(guard):
+    """Catalog rule 6: declared capabilities must match what the plugin registers."""
     import yaml
     manifest = yaml.safe_load(_root().joinpath("plugin.yaml").read_text(encoding="utf-8"))
     assert manifest["name"] == "usage-guard"
-    assert manifest["provides_middleware"] == ["llm_execution"]
-    assert manifest["provides_tools"] == [] and manifest["provides_hooks"] == []
+    seen = {"mw": [], "hooks": [], "tools": []}
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            return default
+
+        def register_middleware(self, kind, fn):
+            seen["mw"].append(kind)
+
+        def register_hook(self, name, fn):
+            seen["hooks"].append(name)
+
+        def register_tool(self, *a, **k):
+            seen["tools"].append(a)
+
+    guard.register(Ctx())
+    assert sorted(manifest["provides_middleware"]) == sorted(seen["mw"])
+    assert sorted(manifest["provides_hooks"]) == sorted(seen["hooks"])
+    assert manifest["provides_tools"] == [] and seen["tools"] == []
     assert manifest.get("requires_env") in (None, [])
 
 

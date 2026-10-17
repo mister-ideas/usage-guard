@@ -117,6 +117,16 @@ DEFAULTS: dict[str, Any] = {
     "min_fetch_interval_s": 30.0,
     # False: deny on stale/missing/unavailable data (recommended). True: allow.
     "fail_open": False,
+    # Near-the-wall behaviour. Both read the cache only (never the network).
+    # Usage levels (percent used) at which a short note is added to the next
+    # turn's context so the agent can wind down before the hard refusal. [] = off.
+    "warn_percents": [80.0, 90.0],
+    # From this usage level up (and below the threshold), cap the output budget
+    # of each request at max_tokens_near_wall tokens, so a request that starts
+    # inside the allowance can spill less. 0 = off (default: a cap can truncate
+    # answers, so it is opt-in).
+    "near_wall_percent": 90.0,
+    "max_tokens_near_wall": 0,
 }
 
 _NOTICE_HEADER = (
@@ -125,7 +135,9 @@ _NOTICE_HEADER = (
 )
 _EXHAUSTED_NOTICE = (
     "{windows} — the request was not sent to the provider. "
-    "Switch /model to another provider or wait for the reset."
+    "Switch /model to another provider or wait for the reset. "
+    "This is a usage-limit stop, not a task result: autonomous loops "
+    "(/goal, cron) should pause until the reset instead of retrying."
 )
 _UNAVAILABLE_NOTICE = (
     "Usage guard could not confirm remaining allowance for provider {provider} "
@@ -709,6 +721,19 @@ def _max_age(value: Any) -> Optional[float]:
     return age if math.isfinite(age) and age >= 0 else None
 
 
+def _clean_levels(value: Any) -> Optional[list[float]]:
+    """A list of usage levels in (0, 100], sorted and de-duplicated; None if malformed."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    levels: list[float] = []
+    for item in value:
+        level = _threshold(item)
+        if level is None or level <= 0:
+            return None
+        levels.append(level)
+    return sorted(set(levels))
+
+
 def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any], bool]:
     """Read and validate settings. Returns (settings, config_ok).
 
@@ -792,6 +817,28 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
             LOG.warning("usage-guard: malformed fail_open %r; using default", fail_open)
         else:
             settings["fail_open"] = fail_open
+
+        raw_warn = get_config("warn_percents", DEFAULTS["warn_percents"])
+        warn = _clean_levels(raw_warn)
+        if warn is None:
+            config_ok = False
+            LOG.warning("usage-guard: malformed warn_percents %r; using default", raw_warn)
+        else:
+            settings["warn_percents"] = warn
+
+        near = _threshold(get_config("near_wall_percent", DEFAULTS["near_wall_percent"]))
+        if near is None:
+            config_ok = False
+            LOG.warning("usage-guard: malformed near_wall_percent; using default")
+        else:
+            settings["near_wall_percent"] = near
+
+        cap = get_config("max_tokens_near_wall", DEFAULTS["max_tokens_near_wall"])
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
+            config_ok = False
+            LOG.warning("usage-guard: malformed max_tokens_near_wall %r; using default", cap)
+        else:
+            settings["max_tokens_near_wall"] = cap
 
 
     except Exception:
@@ -1409,8 +1456,143 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
             raise
 
 
+# ── near the wall: request shaping and early notice (cache-only) ───────────
+
+_SESSION_PROVIDER_MAX = 256
+_near_wall_lock = threading.Lock()
+_session_provider: "dict[str, str]" = {}
+_warned_level: "dict[tuple[str, str], float]" = {}
+
+# Output-budget keys per request shape. Only an existing key is ever lowered;
+# a key the request does not carry is never added.
+_OUTPUT_BUDGET_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
+def _peak_percent(provider: str, settings: dict[str, Any]) -> Optional[tuple[float, dict[str, Any]]]:
+    """Highest used_percent of the provider's cached snapshot and that window.
+
+    Cache only: a stale or missing snapshot returns None, so neither the cap nor
+    the notice ever acts on evidence the guard could not vouch for.
+    """
+    source_key = settings["provider_sources"].get(provider, provider)
+    record = _read_cache().get("providers", {}).get(source_key)
+    if not isinstance(record, dict):
+        return None
+    now = _now_utc()
+    age = _evidence_age_s(record, now)
+    if age is None or age > max(settings["stale_grace_s"], settings["max_cache_age_s"]):
+        return None
+    record = _scaled_record(record, settings["source_scales"].get(source_key, "percent"))
+    best: Optional[tuple[float, dict[str, Any]]] = None
+    for window in (record or {}).get("windows") or []:
+        used = window.get("used_percent") if isinstance(window, dict) else None
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+            continue
+        if best is None or float(used) > best[0]:
+            best = (float(used), window)
+    return best
+
+
+def _remember_session_provider(session_id: Any, provider: str) -> None:
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _near_wall_lock:
+        _session_provider.pop(session_id, None)
+        _session_provider[session_id] = provider
+        while len(_session_provider) > _SESSION_PROVIDER_MAX:
+            _session_provider.pop(next(iter(_session_provider)))
+
+
+def shape_llm_request(config_reader: Callable[[str, Any], Any], **kwargs: Any) -> Any:
+    """``llm_request`` middleware: remember the session's provider and, when the
+    opt-in cap is on and a window is near the wall, lower the output budget.
+
+    Never raises and never blocks (a request-shaping failure must not become a
+    refusal; the ``llm_execution`` gate stays the only enforcer).
+    """
+    try:
+        provider = kwargs.get("provider")
+        provider = provider if isinstance(provider, str) else ""
+        _remember_session_provider(kwargs.get("session_id"), provider)
+        request = kwargs.get("request")
+        if not provider or not isinstance(request, dict):
+            return None
+        settings, config_ok = _read_settings(config_reader)
+        cap = settings["max_tokens_near_wall"]
+        if not config_ok or cap <= 0 or provider not in settings["provider_keys"]:
+            return None
+        peak = _peak_percent(provider, settings)
+        if peak is None or not settings["near_wall_percent"] <= peak[0] < settings["threshold_percent"]:
+            return None
+        shaped = dict(request)
+        changed = False
+        for key in _OUTPUT_BUDGET_KEYS:
+            current = shaped.get(key)
+            if isinstance(current, int) and not isinstance(current, bool) and current > cap:
+                shaped[key] = cap
+                changed = True
+        if not changed:
+            return None
+        return {"request": shaped, "source": "usage-guard",
+                "reason": f"output capped at {cap} tokens near the usage wall ({peak[0]:.0f}% used)"}
+    except Exception:
+        LOG.warning("usage-guard: request shaping skipped", exc_info=True)
+        return None
+
+
+def near_wall_notice(config_reader: Callable[[str, Any], Any], **kwargs: Any) -> Any:
+    """``pre_llm_call`` hook: one short note per usage level crossed.
+
+    ``pre_llm_call`` does not carry the provider, so it is taken from the
+    session's last ``llm_request``; the first turn of a session has none and
+    stays silent. Returns ``{"context": text}`` or None; never raises.
+    """
+    try:
+        session_id = kwargs.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        settings, config_ok = _read_settings(config_reader)
+        levels = settings["warn_percents"]
+        if not config_ok or not levels:
+            return None
+        with _near_wall_lock:
+            provider = _session_provider.get(session_id)
+        if not provider or provider not in settings["provider_keys"]:
+            return None
+        peak = _peak_percent(provider, settings)
+        key = (session_id, provider)
+        if peak is None or peak[0] < levels[0]:
+            with _near_wall_lock:
+                _warned_level.pop(key, None)
+            return None
+        crossed = max(level for level in levels if level <= peak[0])
+        with _near_wall_lock:
+            if _warned_level.get(key, 0.0) >= crossed:
+                return None
+            _warned_level[key] = crossed
+            while len(_warned_level) > _SESSION_PROVIDER_MAX:
+                _warned_level.pop(next(iter(_warned_level)))
+        return {"context": (
+            f"Usage guard notice: a subscription window for provider {provider} is "
+            f"{peak[0]:.0f}% used (resets {_fmt_reset(peak[1])}). Requests are refused at "
+            f"{settings['threshold_percent']:.0f}%. Prefer finishing or checkpointing the "
+            "current work over starting long new tasks."
+        )}
+    except Exception:
+        LOG.warning("usage-guard: near-wall notice skipped", exc_info=True)
+        return None
+
+
 def register(ctx) -> None:
     def middleware(**kwargs: Any) -> Any:
         return gate_llm_execution(ctx.get_config, **kwargs)
 
+    def request_shaper(**kwargs: Any) -> Any:
+        return shape_llm_request(ctx.get_config, **kwargs)
+
+    def pre_llm_call(**kwargs: Any) -> Any:
+        return near_wall_notice(ctx.get_config, **kwargs)
+
     ctx.register_middleware("llm_execution", middleware)
+    ctx.register_middleware("llm_request", request_shaper)
+    ctx.register_hook("pre_llm_call", pre_llm_call)

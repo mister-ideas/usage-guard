@@ -70,6 +70,11 @@ Use Hermes' supported settings CLI/UI. Keys live under `plugins.entries.usage-gu
 | `stale_grace_s` | `900` | While a refresh is failing or rate-limited, keep deciding on the last good snapshot for up to this long instead of refusing. `0` restores the strict stale policy |
 | `min_fetch_interval_s` | `30` | Hard floor between two network reads of one source, enforced across processes. `0` disables |
 | `source_min_intervals` | `{"anthropic": 180, "openai-codex": 180, "openrouter": 30}` | Per-source floors; see [Refresh cadence per provider](#refresh-cadence-per-provider) |
+| `warn_percents` | `[80, 90]` | Usage levels (percent used) at which one short note is added to the next turn's context, so the agent can wind down before the refusal. `[]` disables |
+| `near_wall_percent` | `90.0` | From this level up (and below `threshold_percent`), `max_tokens_near_wall` applies |
+| `max_tokens_near_wall` | `0` | Cap on each request's output budget near the wall, to limit how far an in-flight request can spill. `0` disables (default: a cap can truncate answers) |
+
+Want a safety margin instead of hitting the wall? Set `threshold_percent: 97`. The default stays 100 so the only blocking point is the subscription limit itself.
 
 Custom provider plugins are gated by adding their IDs, for example:
 
@@ -112,7 +117,26 @@ Not gated on stock Hermes (observer-only upstream hooks; this plugin does not pa
 - Auxiliary calls: compression, vision, background review, titles — and the **MoA advisor fan-out**, which runs as an auxiliary call during request assembly, *before* the middleware.
 - Consequence: a MoA turn refused because a guarded slot is exhausted has already dispatched that turn's advisor fan-out. The refusal stops the aggregator and every later iteration; switch `/model` to stop advisor spend.
 
-On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
+To keep auxiliary work off a guarded provider today, point the task at another provider with the stock `auxiliary.<task>` settings (for example `auxiliary.compression`, `auxiliary.title_generation`). Auxiliary calls that run inside a turn are followed by a main-loop request, which the guard can still refuse; the uncovered case is auxiliary work with no turn (cron, idle gateway work).
+
+Closing the gap needs a Hermes change: an opt-in `auxiliary_execution` middleware kind (proposal in preparation, not yet submitted, so not in any release). On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
+
+## Near the wall (v0.3.0)
+
+Both features read the cache only: they never call the usage endpoint and never act on stale evidence.
+
+- **Early notice (`pre_llm_call`).** When a window first reaches a level in `warn_percents`, one short note is added to that turn's context. It names the provider, the percentage and the reset time. Each level fires once; it re-arms after a reset. The provider comes from the session's previous request, so the first turn of a session stays silent.
+- **Output cap (`llm_request`, opt-in).** With `max_tokens_near_wall` set, a request to a guarded provider that is inside `[near_wall_percent, threshold_percent)` has its existing `max_tokens` / `max_completion_tokens` / `max_output_tokens` lowered to the cap. It never adds a key and never raises a budget. Shaping never refuses anything: the `llm_execution` gate stays the only enforcer.
+
+Neither can recall a request already in flight; they make the remaining headroom go further.
+
+## Long unattended runs (`/goal`, cron, kanban)
+
+The guard checks every main-loop request, including each request inside a long tool-calling turn and subagent requests, not once per user prompt. The refusal text now says it is a usage-limit stop and that autonomous loops should pause until the reset. Hermes itself does not special-case the refusal marker (`usage_guard_blocked`), so the host's loop controls still decide what happens next. Keep a turn budget on unattended loops (`/goal` has `max_turns`).
+
+## How this differs from Hermes core's own usage work
+
+Two open Hermes pull requests add advisory usage handling in core: [#47935](https://github.com/NousResearch/hermes-agent/pull/47935) (an opt-in `usage_guard` config for Codex) and [#60762](https://github.com/NousResearch/hermes-agent/pull/60762) (a fail-open guard before `/goal` continuation). Neither is in a release as far as this README knows. usage-guard is the hard, fail-closed layer: it refuses the provider dispatch itself and denies when evidence is missing or stale. Core's versions warn or pause; this one stops the call.
 
 ## Example refusal notice
 
@@ -120,7 +144,9 @@ On Hermes builds that route auxiliary attempts through the middleware (a host-si
 ⏸️ Usage guard blocked this request: the anthropic usage data source reports an
 exhausted window for provider anthropic (Pro). Session: 100% used, resets
 2026-10-06 21:47 CET — the request was not sent to the provider. Switch /model
-to another provider or wait for the reset.
+to another provider or wait for the reset. This is a usage-limit stop, not a task
+result: autonomous loops (/goal, cron) should pause until the reset instead of
+retrying.
 ```
 
 Blocked responses carry `usage_guard_blocked=True` so callers can distinguish a policy refusal from a provider answer.
