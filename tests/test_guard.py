@@ -498,7 +498,9 @@ def test_manifest_declares_exactly_what_register_adds(guard):
             seen["tools"].append(a)
 
     guard.register(Ctx())
-    assert sorted(manifest["provides_middleware"]) == sorted(seen["mw"])
+    # ``auxiliary_execution`` is declared but registered only on a host that defines it.
+    declared = [m for m in manifest["provides_middleware"] if m != "auxiliary_execution"]
+    assert sorted(declared) == sorted(m for m in seen["mw"] if m != "auxiliary_execution")
     assert sorted(manifest["provides_hooks"]) == sorted(seen["hooks"])
     assert manifest["provides_tools"] == [] and seen["tools"] == []
     assert manifest.get("requires_env") in (None, [])

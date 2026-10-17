@@ -1583,6 +1583,28 @@ def near_wall_notice(config_reader: Callable[[str, Any], Any], **kwargs: Any) ->
         return None
 
 
+def gate_auxiliary_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) -> Any:
+    """``auxiliary_execution`` middleware: the same decision as the main loop, applied to one
+    auxiliary provider attempt (titles, compression, vision, MoA, goal judge, ...).
+
+    A refusal is marked ``auxiliary_refused`` so the host raises instead of handing the refusal
+    text to the consumer as a summary, title or vision answer.
+    """
+    out = gate_llm_execution(config_reader, **kwargs)
+    if getattr(out, "usage_guard_blocked", False) is True:
+        out.auxiliary_refused = True
+    return out
+
+
+def host_supports_auxiliary_execution() -> bool:
+    """True on a Hermes that defines the ``auxiliary_execution`` middleware kind."""
+    try:
+        from hermes_cli.middleware import VALID_MIDDLEWARE
+    except Exception:
+        return False
+    return "auxiliary_execution" in VALID_MIDDLEWARE
+
+
 def register(ctx) -> None:
     def middleware(**kwargs: Any) -> Any:
         return gate_llm_execution(ctx.get_config, **kwargs)
@@ -1593,6 +1615,11 @@ def register(ctx) -> None:
     def pre_llm_call(**kwargs: Any) -> Any:
         return near_wall_notice(ctx.get_config, **kwargs)
 
+    def auxiliary_middleware(**kwargs: Any) -> Any:
+        return gate_auxiliary_execution(ctx.get_config, **kwargs)
+
     ctx.register_middleware("llm_execution", middleware)
+    if host_supports_auxiliary_execution():
+        ctx.register_middleware("auxiliary_execution", auxiliary_middleware)
     ctx.register_middleware("llm_request", request_shaper)
     ctx.register_hook("pre_llm_call", pre_llm_call)
