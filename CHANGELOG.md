@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-10-17
+
+Near-the-wall behaviour, all opt-out or opt-in, all cache-only (no new reads of the usage endpoint).
+
+- **Early notice.** A `pre_llm_call` hook adds one short note to the next turn's context at each `warn_percents` level (default 80 and 90), so the agent can wind down before the refusal. New capability: `provides_hooks: [pre_llm_call]`.
+- **Output cap, opt-in.** An `llm_request` middleware lowers an existing output budget to `max_tokens_near_wall` while a window is inside `[near_wall_percent, threshold_percent)`. Off by default (`0`). New capability: `provides_middleware` gains `llm_request`. It never refuses; the `llm_execution` gate stays the only enforcer.
+- **Refusal wording.** The refusal now says it is a usage-limit stop and that autonomous loops should pause until the reset.
+- **Tests.** The manifest test now compares `plugin.yaml` against what `register()` actually registers (catalog rule 6). New `tests/test_near_wall.py`.
+- **Docs.** New "Near the wall", "Long unattended runs" and "How this differs from Hermes core" sections; the auxiliary-call section lists the stock `auxiliary.<task>` workaround; a `threshold_percent: 97` margin is documented.
+
+Upgrade note: the catalog entry's `capabilities` block must list the new hook and middleware when the pin moves to this version.
+
 ## 0.2.8 — 2026-10-16
 
 README pass, compared against the most-starred Hermes plugin READMEs. Adds a Requirements line, a "What happens on first install" section and a Troubleshooting table; moves Install up to the top. Fixes two wrong claims: the install command (`hermes plugins install` takes a catalog name, a Git URL or `owner/repo` — not a filesystem path) and the MoA resolver (the guard resolves the running preset itself and no longer imports core's normalizer). Documentation only.
