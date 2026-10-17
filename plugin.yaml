@@ -1,14 +1,16 @@
 name: usage-guard
-version: 0.2.8
+version: 0.3.0
 description: "Usage-exhaustion guard: reads account usage into its own cache through Hermes's documented usage fetcher (no credential reaches the plugin) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
 author: mister-ideas
 license: MIT
 kind: standalone
 requires_hermes: ">=0.21.6"
 provides_tools: []
-provides_hooks: []
+provides_hooks:
+  - pre_llm_call
 provides_middleware:
   - llm_execution
+  - llm_request
 config_schema:
   provider_keys:
     type: list
@@ -50,3 +52,15 @@ config_schema:
     type: bool
     default: false
     description: "Allow requests when usage data is stale/missing/unavailable (false = deny, recommended)"
+  warn_percents:
+    type: list
+    default: [80, 90]
+    description: "Usage levels (percent used) at which one short note is added to the next turn's context so the agent can wind down before the refusal; [] disables"
+  near_wall_percent:
+    type: float
+    default: 90.0
+    description: "From this usage level up (and below threshold_percent), max_tokens_near_wall applies"
+  max_tokens_near_wall:
+    type: int
+    default: 0
+    description: "Cap on each request's output budget near the wall, to limit how far an in-flight request can spill; 0 disables (default, since a cap can truncate answers)"
