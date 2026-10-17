@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (draft, waits for Hermes core PR #140694 to ship)
+
+- **Auxiliary calls are gated.** On a Hermes that defines the `auxiliary_execution` middleware kind, the guard applies the same decision to titles, compression, vision, MoA and the goal judge. A refusal carries `auxiliary_refused`, which the host turns into an error, so refusal text is never stored as a summary or a title. On older hosts the kind is not registered and behaviour is unchanged. `provides_middleware` gains `auxiliary_execution`; set `requires_hermes` to the release that ships it when this is published.
+
 ## 0.3.0 — 2026-10-17
 
 Near-the-wall behaviour, all opt-out or opt-in, all cache-only (no new reads of the usage endpoint).
