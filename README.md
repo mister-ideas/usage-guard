@@ -22,13 +22,13 @@ Who it is for: anyone on a subscription whose account allows extra usage and who
 
 **Requirements:** Hermes `>=0.21.6` (the `llm_execution` middleware and the account-usage fetcher). No Python dependencies, no API keys, no account changes. Any platform Hermes runs on.
 
-From the Hermes catalog — the entry is in review as [NousResearch/hermes-agent#139993](https://github.com/NousResearch/hermes-agent/pull/139993):
+From the Hermes catalog — usage-guard is listed there ([entry](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/usage-guard.yaml), added in [NousResearch/hermes-agent#139993](https://github.com/NousResearch/hermes-agent/pull/139993)):
 
 ```
 hermes plugins install usage-guard
 ```
 
-Straight from this repository, which works today — `hermes plugins install` accepts a Git URL or `owner/repo`, and `--ref` pins an exact reviewed commit:
+Straight from this repository — `hermes plugins install` accepts a Git URL or `owner/repo`, and `--ref` pins an exact reviewed commit:
 
 ```
 hermes plugins install mister-ideas/usage-guard
