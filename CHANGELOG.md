@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-10-19
+
+First-user hardening. No behaviour change in the guard itself.
+
+- **No `pyproject.toml`.** Hermes's installer treats any plugin with a `pyproject.toml` as a Python-dependency member: a normal install asked "declares Python dependencies", and a headless `plugins install --enable` could not enable the plugin. The plugin has no runtime dependencies, so the file only carried dev tooling. Ruff and pytest settings moved to `ruff.toml` and `pytest.ini`; dev tools are in `requirements-dev.txt`; `plugin.yaml` is now the only place the version lives.
+- **Banner and social-preview image** in `assets/`; the README opens with the banner.
+- **Tests.** A host-contract test asserts the installer sees no Python declaration, and an offline test keeps `pyproject.toml` and runtime `requirements*.txt` out of the plugin root.
+- `.gitignore` covers egg-info and bytecode.
+
 ## 0.3.0 — 2026-10-17
 
 Near-the-wall behaviour, all opt-out or opt-in, all cache-only (no new reads of the usage endpoint).
