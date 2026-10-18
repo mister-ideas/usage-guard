@@ -1,5 +1,7 @@
 # usage-guard
 
+![usage-guard: stop your Hermes agent at the subscription wall](https://raw.githubusercontent.com/mister-ideas/usage-guard/main/assets/banner.png)
+
 [![CI](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mister-ideas/usage-guard)](https://github.com/mister-ideas/usage-guard/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -206,7 +208,7 @@ The account-usage data comes from core's documented `agent.account_usage.fetch_a
 ## Development
 
 ```
-python -m pip install -e '.[dev]'
+python -m pip install -r requirements-dev.txt
 python -m pytest tests -v          # offline suite (host-contract tests skip)
 ruff check .
 python scripts/package.py          # dist/usage-guard-<version>.zip
