@@ -30,7 +30,7 @@ Do not claim this plugin guarantees subscription safety or prevents extra billin
 
 ## Development workflow
 
-1. Install dev dependencies: `python -m pip install -e '.[dev]'`
+1. Install dev dependencies: `python -m pip install -r requirements-dev.txt`
 2. Run the tests: `python -m pytest tests -v` (host-contract tests skip unless `HERMES_CORE` points at a Hermes checkout).
 3. Lint: `ruff check .`
 4. Package check: `python scripts/package.py`
