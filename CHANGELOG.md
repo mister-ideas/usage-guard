@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Banner and social preview redrawn in the same style as git-review: a marble Hermes halting before a full usage gauge, `USAGE-GUARD` title, `mister-ideas` signature (still 1200×600 and 1280×640).
+
 ## 0.3.1 — 2026-10-19
 
 First-user hardening. No behaviour change in the guard itself.
