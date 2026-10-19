@@ -141,6 +141,29 @@ def test_every_own_failure_reason_still_denies(guard):
         assert out.usage_guard_blocked is True, reason
 
 
+def test_the_gating_configuration_is_logged_once(guard, caplog):
+    """An installed-but-unconfigured guard must be visible in the logs, not
+    indistinguishable from one that is gating and finding nothing to block."""
+    guard._logged_gating = False
+    with caplog.at_level("INFO", logger="plugins.usage-guard"):
+        invoke(guard, make_record(10))
+        invoke(guard, make_record(10))
+    hits = [r.getMessage() for r in caplog.records if "gating providers" in r.getMessage()]
+    assert len(hits) == 1
+    assert "anthropic" in hits[0] and "threshold" in hits[0]
+
+
+def test_an_ungated_provider_is_named_once(guard, caplog):
+    """A provider outside provider_keys passes through, and the reason is on record."""
+    guard._logged_gating = False
+    guard._ungated_logged.clear()
+    with caplog.at_level("INFO", logger="plugins.usage-guard"):
+        invoke(guard, make_record(10), provider="some-other-provider")
+        invoke(guard, make_record(10), provider="some-other-provider")
+    hits = [r.getMessage() for r in caplog.records if "is not gated" in r.getMessage()]
+    assert len(hits) == 1 and "some-other-provider" in hits[0]
+
+
 # ── durable state: the plugin's own data dir, resolved per call ──────────────
 
 def test_cache_path_uses_the_plugin_data_dir(guard):

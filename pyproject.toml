@@ -1,6 +1,6 @@
 [project]
 name = "usage-guard"
-version = "0.2.8"
+version = "0.2.9"
 description = "Hermes Agent plugin: fail-closed subscription usage guard"
 requires-python = ">=3.10"
 

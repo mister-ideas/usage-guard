@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.9 — 2026-10-16
+
+The guard now says what it gates. It logs `usage-guard: gating providers [...]` once on its first guarded dispatch — provider list, sources, threshold, `fail_open` — and names each provider that passes through because it is not in `provider_keys`. Until now an installed-but-unconfigured guard was indistinguishable in the logs from one that gates and finds nothing to block, so a provider missing from `provider_keys` looked like a working guard that never fired. The README's "it never blocks" row points at both lines.
+
 ## 0.2.8 — 2026-10-16
 
 README pass, compared against the most-starred Hermes plugin READMEs. Adds a Requirements line, a "What happens on first install" section and a Troubleshooting table; moves Install up to the top. Fixes two wrong claims: the install command (`hermes plugins install` takes a catalog name, a Git URL or `owner/repo` — not a filesystem path) and the MoA resolver (the guard resolves the running preset itself and no longer imports core's normalizer). Documentation only.
