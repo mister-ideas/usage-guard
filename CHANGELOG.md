@@ -2,6 +2,14 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.3.3 — 2026-10-19
+
+Consistency pass with git-review: same README skeleton, same asset names, same manifest layout. No behaviour change in the guard.
+
+- README: new **Requirements** section; the disclosures live under **Privacy and disclosure**; **Troubleshooting** follows it, before Development; the "Near the wall" heading no longer carries a version number; shell blocks are tagged `sh`; the Development block runs `hermes plugins validate`. Fixed a link that pointed at a heading that no longer exists.
+- Banner is `docs/banner.jpg` (was `assets/banner.png`), social preview is `docs/social-preview.png` (was `assets/social-preview.png`).
+- `plugin.yaml`: one-sentence `description`, `manifest_version: 1` and an explicit `requires_env: []`, in the same key order as git-review.
+
 ## 0.3.2 — 2026-10-19
 
 Catalog-readiness pass, compared against the most-starred Hermes plugins. No behaviour change in the guard.

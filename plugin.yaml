@@ -1,16 +1,18 @@
 name: usage-guard
-version: 0.3.2
-description: "Usage-exhaustion guard: reads account usage into its own cache through Hermes's documented usage fetcher (no credential reaches the plugin) and denies llm_execution when a configured provider's usage window is exhausted on fresh data; a rate-limited or failing refresh keeps deciding on the last good snapshot instead of refusing; configurable stale-data policy (fail-closed by default)."
+version: 0.3.3
+description: "Keeps a Hermes agent inside its subscription allowance: refuses a provider call once a usage window is exhausted, so paid extra usage is never spent."
 author: mister-ideas
 license: MIT
-kind: standalone
+manifest_version: 1
 requires_hermes: ">=0.21.6"
+kind: standalone
 provides_tools: []
 provides_hooks:
   - pre_llm_call
 provides_middleware:
   - llm_execution
   - llm_request
+requires_env: []
 config_schema:
   provider_keys:
     type: list

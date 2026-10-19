@@ -1,6 +1,6 @@
 # usage-guard
 
-![usage-guard: a marble Hermes halts before a full usage gauge. Stop your Hermes agent at the subscription wall.](assets/banner.png)
+![usage-guard: a marble Hermes halts before a full usage gauge. Stop your Hermes agent at the subscription wall.](docs/banner.jpg)
 
 [![CI](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mister-ideas/usage-guard)](https://github.com/mister-ideas/usage-guard/releases)
@@ -18,39 +18,43 @@ This plugin makes Hermes stop at the wall instead. When a subscription window re
 
 Who it is for: anyone on a subscription whose account allows extra usage and who wants the agent confined to the subscription allowance — including a shared or company plan, where one agent should not consume the organization's paid credits.
 
-**What it is not.** It cannot guarantee zero extra usage: a request that starts inside the allowance can still spill into paid usage on the provider's side, and the guard stops the next one (see [Provenance and limits](#provenance-and-limits)). If you need a hard guarantee, disable extra usage on the account itself — this plugin is the in-Hermes layer that keeps the agent from crossing the line on its own.
+**What it is not.** It cannot guarantee zero extra usage: a request that starts inside the allowance can still spill into paid usage on the provider's side, and the guard stops the next one (see [Provenance and limits](#privacy-and-disclosure)). If you need a hard guarantee, disable extra usage on the account itself — this plugin is the in-Hermes layer that keeps the agent from crossing the line on its own.
+
+## Requirements
+
+- Hermes `>=0.21.6` (the `llm_execution` middleware and the account-usage fetcher).
+- No Python dependencies, no API keys, no account changes.
+- Any platform Hermes runs on.
 
 ## Install
 
-**Requirements:** Hermes `>=0.21.6` (the `llm_execution` middleware and the account-usage fetcher). No Python dependencies, no API keys, no account changes. Any platform Hermes runs on.
-
 From the Hermes catalog — usage-guard is listed there ([entry](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/usage-guard.yaml), added in [NousResearch/hermes-agent#139993](https://github.com/NousResearch/hermes-agent/pull/139993)):
 
-```
+```sh
 hermes plugins install usage-guard
 ```
 
 Straight from this repository — `hermes plugins install` accepts a Git URL or `owner/repo`, and `--ref` pins an exact reviewed commit:
 
-```
+```sh
 hermes plugins install mister-ideas/usage-guard
 ```
 
 Then make sure it is enabled and **restart Hermes**, because middleware is bound when the backend process starts:
 
-```
+```sh
 hermes plugins enable usage-guard
 ```
 
 Uninstall:
 
-```
+```sh
 hermes plugins remove usage-guard
 ```
 
 ## Updating
 
-```
+```sh
 hermes plugins check-updates          # read-only: is a newer version available?
 hermes plugins update usage-guard
 ```
@@ -103,19 +107,6 @@ plugins:
 
 The Anthropic source resolves the core Claude OAuth credential. A custom Claude config directory can refer to a different account; do not treat that as matching evidence.
 
-## Troubleshooting
-
-| Symptom | What is happening | What to do |
-|---|---|---|
-| Blocked at a few percent | On stock Hermes, upstream's Anthropic parser scales any `utilization` ≤ 1 by 100, so a window at 0–1% can arrive as 100%. It hits every account right after a reset. | Nothing to fix here: it is [upstream's parser](https://github.com/NousResearch/hermes-agent/issues/58226), fixed by [PR #139916](https://github.com/NousResearch/hermes-agent/pull/139916). Until a release carries it: wait for the reset, or drop the provider from `provider_keys` if you accept it being ungated. |
-| Blocked although usage looks fine | The window the notice names is at/over the threshold *in the snapshot the guard read*. The notice prints the label, the value and the reset time. | Read the notice: it names the window. Compare with `hermes usage`. A stale reset is never treated as replenishment. |
-| Blocked, notice says the configuration is malformed | A setting has the wrong shape, and a broken policy denies by design rather than silently disabling the guard. | Fix `plugins.entries.usage-guard.settings` (or remove the plugin). The log line names the key. |
-| Blocked with "usable allowance evidence is missing" | No snapshot within `stale_grace_s` (900s) — the source is failing or unreadable. | Check `grep plugins.usage-guard ~/.hermes/logs/agent.log*`. If you prefer availability over protection, set `fail_open: true` knowingly. |
-| It never blocks | The provider may not be listed in `provider_keys`, the window may genuinely be under the threshold, or the call may not be gated at all. | Check `provider_keys`; see [What stock Hermes can and cannot gate](#what-stock-hermes-can-and-cannot-gate) for calls that bypass the middleware. |
-| "reports no account usage to guard" warning | The account has no subscription usage surface — an Anthropic API-key account publishes no limits on the OAuth usage endpoint. | Expected: the provider passes through rather than being blocked. Remove it from `provider_keys` to silence the warning. |
-| "usage endpoint rate-limiting" messages | The usage endpoint answered 429. The guard backs off (honouring `Retry-After`) and keeps deciding on the last good snapshot. | Nothing — a rate limit never refuses a request. Raising a floor or refreshing harder only deepens the backoff. |
-| I need to unblock right now | — | Switch `/model` to another provider, wait for the reset, remove the provider from `provider_keys`, or `hermes plugins remove usage-guard`. |
-
 ## What stock Hermes can and cannot gate
 
 Gated (the `llm_execution` middleware is the only stock enforcement point):
@@ -132,7 +123,7 @@ To keep auxiliary work off a guarded provider today, point the task at another p
 
 Closing the gap needs a Hermes change: an opt-in `auxiliary_execution` middleware kind, proposed in [NousResearch/hermes-agent#140694](https://github.com/NousResearch/hermes-agent/pull/140694) (open, not in any release yet). On Hermes builds that route auxiliary attempts through the middleware (a host-side integration), auxiliary requests are enforced the same way; auxiliary consumers reject the `usage_guard_blocked` marker rather than use it as a compression/vision result.
 
-## Near the wall (v0.3.0)
+## Near the wall
 
 Both features read the cache only: they never call the usage endpoint and never act on stale evidence.
 
@@ -151,7 +142,7 @@ Two open Hermes pull requests add advisory usage handling in core: [#47935](http
 
 ## Example refusal notice
 
-```
+```text
 ⏸️ Usage guard blocked this request: the anthropic usage data source reports an
 exhausted window for provider anthropic (Pro). Session: 100% used, resets
 2026-10-06 21:47 CET — the request was not sent to the provider. Switch /model
@@ -201,11 +192,9 @@ Providers differ by orders of magnitude, so the floor between two reads is decla
 
 Lowering a floor below these values is allowed but self-defeating: the endpoint answers with a 429, the guard backs off exponentially (up to 15 minutes) and serves the last good snapshot, so the *effective* refresh rate ends up worse than the floor would have given. Several concurrent sessions never multiply the request rate — they share the cache and the atomic claim.
 
-## Provenance and limits
+## Privacy and disclosure
 
 The account-usage data comes from core's documented `agent.account_usage.fetch_account_usage` for every source, Anthropic included. The guard's own cache is `usage.json` in `plugin-data/usage-guard/`, in the per-plugin data root Hermes resolves for the active profile, and it stores only windows, timestamps, plan and failure reasons — never credentials or raw payloads. Reads and merges are serialized with an advisory file lock (POSIX `flock` / Windows `locking`) so the desktop backend and a gateway sharing one Hermes home cannot lose each other's records.
-
-**Disclosures**
 
 - Network: the plugin makes **no** usage request of its own. Each refresh calls `agent.account_usage.fetch_account_usage`, which performs the authenticated read through Hermes (the Anthropic OAuth usage endpoint and the Codex `wham/usage` endpoint on `chatgpt.com`, both **undocumented upstream** and able to change). A changed or failing source fails closed (denials), never open.
 - Credential binding: the `llm_execution` middleware payload does not attest which credential/account a request will use, so the guard polls the account the core resolver returns and cannot prove it matches the request. With credential pools or per-session overrides, treat the reading as account-level evidence, not request-level.
@@ -214,18 +203,32 @@ The account-usage data comes from core's documented `agent.account_usage.fetch_a
 - No usage surface: a provider whose account has no subscription usage to read — an Anthropic API-key account, whose limits the OAuth usage endpoint does not publish — is passed through with one warning naming the source, rather than refused. The guard's own failure reasons (`fetch-error`, `no-data`, the `malformed-*` set) keep the fail-closed policy.
 - Durable state: two profiles on one machine keep separate usage evidence, because the cache path is resolved per profile. It holds windows, timestamps, plan and failure reasons only — never credentials or raw payloads.
 
+## Troubleshooting
+
+| Symptom | What is happening | What to do |
+|---|---|---|
+| Blocked at a few percent | On stock Hermes, upstream's Anthropic parser scales any `utilization` ≤ 1 by 100, so a window at 0–1% can arrive as 100%. It hits every account right after a reset. | Nothing to fix here: it is [upstream's parser](https://github.com/NousResearch/hermes-agent/issues/58226), fixed by [PR #139916](https://github.com/NousResearch/hermes-agent/pull/139916). Until a release carries it: wait for the reset, or drop the provider from `provider_keys` if you accept it being ungated. |
+| Blocked although usage looks fine | The window the notice names is at/over the threshold *in the snapshot the guard read*. The notice prints the label, the value and the reset time. | Read the notice: it names the window. Compare with `hermes usage`. A stale reset is never treated as replenishment. |
+| Blocked, notice says the configuration is malformed | A setting has the wrong shape, and a broken policy denies by design rather than silently disabling the guard. | Fix `plugins.entries.usage-guard.settings` (or remove the plugin). The log line names the key. |
+| Blocked with "usable allowance evidence is missing" | No snapshot within `stale_grace_s` (900s) — the source is failing or unreadable. | Check `grep plugins.usage-guard ~/.hermes/logs/agent.log*`. If you prefer availability over protection, set `fail_open: true` knowingly. |
+| It never blocks | The provider may not be listed in `provider_keys`, the window may genuinely be under the threshold, or the call may not be gated at all. | Check `provider_keys`; see [What stock Hermes can and cannot gate](#what-stock-hermes-can-and-cannot-gate) for calls that bypass the middleware. |
+| "reports no account usage to guard" warning | The account has no subscription usage surface — an Anthropic API-key account publishes no limits on the OAuth usage endpoint. | Expected: the provider passes through rather than being blocked. Remove it from `provider_keys` to silence the warning. |
+| "usage endpoint rate-limiting" messages | The usage endpoint answered 429. The guard backs off (honouring `Retry-After`) and keeps deciding on the last good snapshot. | Nothing — a rate limit never refuses a request. Raising a floor or refreshing harder only deepens the backoff. |
+| I need to unblock right now | — | Switch `/model` to another provider, wait for the reset, remove the provider from `provider_keys`, or `hermes plugins remove usage-guard`. |
+
 ## Development
 
-```
+```sh
 python -m pip install -r requirements-dev.txt
 python -m pytest tests -v          # offline suite (host-contract tests skip)
 ruff check .
+hermes plugins validate . --install-deps
 python scripts/package.py          # dist/usage-guard-<version>.zip
 ```
 
 Host-contract tests run against a real Hermes tree: point `HERMES_CORE` at a checkout (CI pins one):
 
-```
+```sh
 HERMES_CORE=/path/to/hermes-agent python -m pytest tests/test_host_contract.py -v
 ```
 
