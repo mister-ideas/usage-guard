@@ -929,6 +929,43 @@ def _warn_no_usage_surface_once(source_key: str, reason: str) -> None:
     )
 
 
+_gating_lock = threading.Lock()
+_gating_logged = False
+_ungated_logged: set[str] = set()
+
+
+def _log_gating_once(settings: dict[str, Any]) -> None:
+    """Name what the guard gates, once per process.
+
+    An installed-but-unconfigured guard is otherwise indistinguishable in the
+    logs from one that is gating and finding nothing to block: the provider list
+    it runs on is invisible, so a provider missing from it looks like a working
+    guard that never fires.
+    """
+    global _gating_logged
+    with _gating_lock:
+        if _gating_logged:
+            return
+        _gating_logged = True
+    LOG.info(
+        "usage-guard: gating providers %s (sources: %s); threshold %.0f%%, fail_open=%s",
+        list(settings["provider_keys"]), dict(settings["provider_sources"]),
+        settings["threshold_percent"], settings["fail_open"],
+    )
+
+
+def _log_ungated_once(provider: str) -> None:
+    """Say once per provider that a dispatch passed through because it is not gated."""
+    with _gating_lock:
+        if provider in _ungated_logged:
+            return
+        _ungated_logged.add(provider)
+    LOG.info(
+        "usage-guard: provider %r is not gated (not listed in provider_keys); its requests "
+        "pass through untouched", provider,
+    )
+
+
 def _scaled_record(record: Optional[dict[str, Any]], scale: str) -> Optional[dict[str, Any]]:
     """Copy a record with every window normalized to the guard's percentage scale.
 
@@ -1429,9 +1466,13 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
                 "or remove/uninstall the plugin.",
             )
         if provider == "moa":
+            _log_gating_once(settings)
             return _gate_moa(kwargs, settings, config_ok, downstream, request)
         if provider not in settings["provider_keys"]:
+            _log_gating_once(settings)
+            _log_ungated_once(provider)
             return downstream(request)
+        _log_gating_once(settings)
         source_key = settings["provider_sources"].get(provider, provider)
         decision = _decide_provider(provider, source_key, settings, config_ok)
         if decision.allow:
