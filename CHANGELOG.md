@@ -2,11 +2,13 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
-## 0.3.7 — 2026-10-19
+## 0.3.8 — 2026-10-19
 
 The guard now says what it gates. It logs `usage-guard: gating providers [...]` once on its first guarded dispatch — provider list, sources, threshold, `fail_open` — and names each provider that passes through because it is not in `provider_keys`. The README's "It never blocks" row points at both lines.
 
 An installed-but-unconfigured guard was previously indistinguishable in the logs from one that gates and finds nothing to block, so a provider missing from `provider_keys` looked like a working guard that never fired.
+
+Version 0.3.7 was withdrawn before release: its merge commit was authored with a personal address, which this repository's identity guard rejects, and an immutable release reserves its tag name. The content is unchanged.
 
 ## 0.3.6 — 2026-10-19
 
