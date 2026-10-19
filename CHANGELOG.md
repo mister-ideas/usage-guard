@@ -2,6 +2,12 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.3.9 — 2026-10-19
+
+A snapshot is no longer called stale before the guard is allowed to replace it. The freshness window is now `max(max_cache_age_s, the source's read floor)` — the value the README already described as the effective cadence.
+
+With a 60s window and the 180s floor declared for `anthropic` and `openai-codex`, every dispatch landing in between found the record stale, asked for a refresh, was refused by the floor, and then refused the request for "no fresh snapshot" — while a usable snapshot sat on disk. Fail-closed is unchanged past the floor: when no refresh lands and no read failure explains it, the guard still refuses rather than deciding on evidence it cannot vouch for, and the exhaustion interlock applies to whatever record is read.
+
 ## 0.3.8 — 2026-10-19
 
 The guard now says what it gates. It logs `usage-guard: gating providers [...]` once on its first guarded dispatch — provider list, sources, threshold, `fail_open` — and names each provider that passes through because it is not in `provider_keys`. The README's "It never blocks" row points at both lines.
