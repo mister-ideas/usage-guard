@@ -132,6 +132,31 @@ def test_a_source_without_a_usage_surface_is_reported_once(guard, caplog):
     assert len(hits) == 1
 
 
+def test_the_gating_configuration_is_logged_once(guard, caplog):
+    """An installed-but-unconfigured guard must be visible in the logs: the
+    provider list it runs on is otherwise invisible, so a provider missing from
+    it looks like a working guard that never fires."""
+    guard._gating_logged = False
+    with caplog.at_level("INFO", logger="plugins.usage-guard"):
+        invoke(guard, make_record(10))
+        invoke(guard, make_record(10))
+    hits = [r.getMessage() for r in caplog.records if "gating providers" in r.getMessage()]
+    assert len(hits) == 1
+    assert "anthropic" in hits[0] and "threshold" in hits[0]
+
+
+def test_an_ungated_provider_is_named_once(guard, caplog):
+    """A provider outside provider_keys passes through untouched, and the reason
+    is on record."""
+    guard._gating_logged = False
+    guard._ungated_logged.clear()
+    with caplog.at_level("INFO", logger="plugins.usage-guard"):
+        invoke(guard, make_record(10), provider="some-other-provider")
+        invoke(guard, make_record(10), provider="some-other-provider")
+    hits = [r.getMessage() for r in caplog.records if "is not gated" in r.getMessage()]
+    assert len(hits) == 1 and "some-other-provider" in hits[0]
+
+
 def test_every_own_failure_reason_still_denies(guard):
     """Only a reason the core reports passes; this plugin's own reasons stay fail-closed."""
     for reason in sorted(guard._OWN_UNAVAILABLE_REASONS):
