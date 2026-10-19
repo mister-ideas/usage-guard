@@ -1,5 +1,5 @@
-# Keep the workflow actions current. The plugin itself has no runtime
-# dependencies, so there is nothing else to update here.
+# Keep the workflow actions (pinned to commit SHAs) current. The plugin itself has
+# no runtime dependencies, so there is nothing else to update here.
 version: 2
 updates:
   - package-ecosystem: github-actions
