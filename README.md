@@ -1,6 +1,6 @@
 # usage-guard
 
-![usage-guard: stop your Hermes agent at the subscription wall](https://raw.githubusercontent.com/mister-ideas/usage-guard/main/assets/banner.png)
+![usage-guard: a marble Hermes halts before a full usage gauge. Stop your Hermes agent at the subscription wall.](https://raw.githubusercontent.com/mister-ideas/usage-guard/main/assets/banner.png)
 
 [![CI](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mister-ideas/usage-guard)](https://github.com/mister-ideas/usage-guard/releases)
