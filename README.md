@@ -78,7 +78,7 @@ Use Hermes' supported settings CLI/UI. Keys live under `plugins.entries.usage-gu
 | `provider_keys` | `["anthropic", "openai-codex"]` | Provider IDs gated on usage data; add custom provider plugin IDs here |
 | `provider_sources` | `{"anthropic": "anthropic", "openai-codex": "openai-codex"}` | provider-id → data-source key; unmapped providers use their own ID |
 | `threshold_percent` | `100.0` | Block when ANY window's used_percent >= this value (default blocks only at 0% left) |
-| `max_cache_age_s` | `60.0` | Maximum snapshot age |
+| `max_cache_age_s` | `60.0` | Freshness window for a snapshot. The value actually used is `max(this, the source's read floor)`, since a snapshot cannot be called stale before the guard may replace it |
 | `poll_wait_timeout_s` | `20.0` | Bounded refresh wait on the stale path |
 | `fail_open` | `false` | Allow requests when evidence is stale, missing or malformed. Keep `false` for safety |
 | `source_scales` | `{"anthropic": "percent", "openai-codex": "percent", "openrouter": "percent"}` | data-source key → value scale: `percent` (0-100) or `fraction` (0-1, scaled ×100 at decision time) |
@@ -163,7 +163,7 @@ Blocked responses carry `usage_guard_blocked=True` so callers can distinguish a 
 
 Usage limits are pulled as often as the endpoint tolerates, so decisions rest on the freshest evidence the guard can get:
 
-- The endpoint is read on a freshness TTL (`max_cache_age_s`), never per request: every guarded ingress shares one cache, and concurrent ones collapse into a single read.
+- The endpoint is read on a freshness TTL (`max_cache_age_s`, raised to the source's read floor when that is larger), never per request: every guarded ingress shares one cache, and concurrent ones collapse into a single read.
 - On the stale path the guard waits up to `poll_wait_timeout_s` for a synchronous refresh before deciding; stale/missing/malformed evidence denies (`fail_open=false`). With the usage endpoint unresponsive, a guarded call can stall up to this long before denying.
 - Simultaneous refreshes for the same provider are coalesced (one in-flight poll; waiters share its result).
 - If the usage endpoint answers HTTP 429, the guard records a bounded backoff (`Retry-After`, capped at 15 minutes and growing with repeated failures) and keeps deciding on the last good snapshot for up to `stale_grace_s` — a rate limit alone never refuses a request.

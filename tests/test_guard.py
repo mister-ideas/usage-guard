@@ -202,15 +202,29 @@ def test_cache_path_falls_back_to_hermes_home(guard, tmp_path, monkeypatch):
 
 # ── stale data and the refresh policy ─────────────────────────────────────
 
-def test_stale_snapshot_denies_fail_closed(guard):
+def test_a_snapshot_inside_the_source_floor_is_not_stale(guard):
+    """The freshness window is never shorter than the source's own read floor.
+
+    Between max_cache_age_s (60s) and that floor (180s for anthropic and
+    openai-codex) the guard may not refresh: calling the snapshot stale there
+    refused every dispatch in the gap while a good snapshot sat on disk.
+    """
     old = (NOW - timedelta(seconds=61)).isoformat()
+    _, calls = invoke(guard, make_record(10, fetched_at=old), max_cache_age_s=60)
+    assert calls == [{}]
+
+
+def test_snapshot_beyond_the_floor_denies_fail_closed(guard):
+    """Past the floor nothing may refresh the record and nothing explains why:
+    the guard refuses rather than deciding on evidence it cannot vouch for."""
+    old = (NOW - timedelta(seconds=241)).isoformat()
     _, calls = invoke(guard, make_record(10, fetched_at=old), max_cache_age_s=60)
     assert calls == []
 
 
-def test_stale_snapshot_denies_when_poll_times_out(guard):
+def test_snapshot_beyond_the_floor_denies_when_poll_times_out(guard):
     """No refresh lands and no read failure is recorded: the stale path denies."""
-    old = (NOW - timedelta(seconds=61)).isoformat()
+    old = (NOW - timedelta(seconds=241)).isoformat()
     rec = make_record(10, fetched_at=old, polled_at=old)
     with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": rec}}), \
          patch.object(guard, "_spawn_poll_for_source"):  # returns without writing
@@ -802,7 +816,7 @@ def test_evidence_older_than_the_grace_window_denies(guard):
 
 
 def test_grace_window_zero_restores_the_strict_stale_policy(guard):
-    rec = _aged(120, used=10, unavailable_reason="fetch-error",
+    rec = _aged(300, used=10, unavailable_reason="fetch-error",
                 backoff_until=(NOW + timedelta(seconds=300)).isoformat())
     out, calls = invoke(guard, rec, stale_grace_s=0.0)
     assert calls == []

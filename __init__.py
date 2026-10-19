@@ -997,6 +997,14 @@ def _decide_provider(
     if not isinstance(record, dict):
         record = None
 
+    # A snapshot cannot be called stale before the guard is permitted to replace
+    # it: the freshness window is never shorter than this source's own read floor.
+    # With a 60s window and a 180s floor, every dispatch landing in between found
+    # the record stale, asked for a refresh, was refused by the floor, and then
+    # denied for "no fresh snapshot" — while a good snapshot sat on disk. The
+    # exhaustion interlock is unaffected: it applies to whatever record is read.
+    fresh_window = max(float(settings["max_cache_age_s"]), _source_interval(source_key, settings))
+
     # A rate limit or a transport error is not evidence about allowance, so it
     # never refuses a request on its own. While a refresh is failing, the last
     # good snapshot stays usable for up to ``stale_grace_s`` and the exhaustion
@@ -1011,7 +1019,7 @@ def _decide_provider(
         and (backing_off or last_read_failed)
     )
 
-    if not backing_off and not _fresh(record, settings["max_cache_age_s"], now):
+    if not backing_off and not _fresh(record, fresh_window, now):
         if spawn_poll:
             # Refresh bounded-synchronously so the decision uses fresh data
             # instead of denying the first request after the cache ages out.
@@ -1038,7 +1046,7 @@ def _decide_provider(
             and (backing_off or last_read_failed)
         )
 
-    if not _fresh(record, settings["max_cache_age_s"], _now_utc()) and not stale_usable:
+    if not _fresh(record, fresh_window, _now_utc()) and not stale_usable:
         reason = (
             record.get("unavailable_reason")
             if isinstance(record, dict) and record.get("unavailable_reason")
@@ -1052,7 +1060,7 @@ def _decide_provider(
             reason=reason,
         )
 
-    if stale_usable and not _fresh(record, settings["max_cache_age_s"], _now_utc()):
+    if stale_usable and not _fresh(record, fresh_window, _now_utc()):
         _warn_stale_evidence_once(source_key, evidence_age or 0.0)
 
     # A source the core reports as having no usage surface (a reason this plugin
