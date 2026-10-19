@@ -1,6 +1,6 @@
 # usage-guard
 
-![usage-guard: a marble Hermes halts before a full usage gauge. Stop your Hermes agent at the subscription wall.](https://raw.githubusercontent.com/mister-ideas/usage-guard/main/assets/banner.png)
+![usage-guard: a marble Hermes halts before a full usage gauge. Stop your Hermes agent at the subscription wall.](assets/banner.png)
 
 [![CI](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/mister-ideas/usage-guard/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mister-ideas/usage-guard)](https://github.com/mister-ideas/usage-guard/releases)
@@ -47,6 +47,15 @@ Uninstall:
 ```
 hermes plugins remove usage-guard
 ```
+
+## Updating
+
+```
+hermes plugins check-updates          # read-only: is a newer version available?
+hermes plugins update usage-guard
+```
+
+Restart Hermes afterwards: middleware is bound when the backend process starts. The catalog pins an exact reviewed commit, so an update reaches you only after a maintainer merges the pin bump.
 
 ## What happens on first install
 

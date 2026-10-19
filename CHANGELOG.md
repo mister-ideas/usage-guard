@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.3.2 — 2026-10-19
+
+Catalog-readiness pass, compared against the most-starred Hermes plugins. No behaviour change in the guard.
+
+- README: the banner is a relative path, so the catalog page renders the image from the pinned tree instead of a moving `main`; new **Updating** section.
+- SECURITY.md: supported versions and what to expect after a report.
 - Banner and social preview redrawn in the same style as git-review: a marble Hermes halting before a full usage gauge, `USAGE-GUARD` title, `mister-ideas` signature (still 1200×600 and 1280×640).
 
 ## 0.3.1 — 2026-10-19
