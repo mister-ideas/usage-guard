@@ -114,6 +114,26 @@ jobs:
             git diff-tree --check --root --no-commit-id -r HEAD
           fi
 
+      - name: Commit identities
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          OWNER_EMAIL='36502095+mister-ideas@users.noreply.github.com'
+          BLOCKED='tech[-]up[.]org|protonmai[l][.]com'
+          if [[ -n "${BASE_SHA:-}" ]]; then RANGE="$BASE_SHA..HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then RANGE="HEAD^..HEAD"
+          else RANGE="HEAD"; fi
+          fail=0
+          while IFS='|' read -r sha an ae cn ce; do
+            if [[ "$ae" =~ $BLOCKED || "$ce" =~ $BLOCKED ]]; then echo "::error::$sha uses a blocked address ($ae / $ce)"; fail=1; fi
+            if [[ "$an" == "mister-ideas" && "$ae" != "$OWNER_EMAIL" ]]; then echo "::error::$sha is authored as mister-ideas with $ae; use $OWNER_EMAIL"; fail=1; fi
+          done < <(git log --no-merges --format='%H|%an|%ae|%cn|%ce' "$RANGE")
+          if git log --no-merges --format='%H%n%B' "$RANGE" | grep -iE '^(co-authored-by|signed-off-by):.*('"$BLOCKED"')'; then
+            echo "::error::a commit message carries a blocked address in a trailer"; fail=1
+          fi
+          exit "$fail"
+
       - name: No personal or machine-specific paths
         run: |
           if grep -RniE '/Users/|/home/[a-z]|C:\\\\Users|\.cursor' --include='*.py' --include='*.js' --include='*.mjs' --include='*.yaml' --include='*.md' . --exclude-dir=.git; then
