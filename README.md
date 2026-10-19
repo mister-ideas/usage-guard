@@ -1,4 +1,4 @@
-# usage-guard
+# usage-guard for Hermes Agent
 
 ![usage-guard: a marble Hermes halts before a full usage gauge. Stop your Hermes agent at the subscription wall.](docs/banner.jpg)
 
