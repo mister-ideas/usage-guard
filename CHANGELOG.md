@@ -2,6 +2,17 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.4.0 — 2026-10-24
+
+Clearer messages and a rewritten README. No change to what is gated, when, or how it is decided.
+
+- **Refusals are plain language.** The chat notice now says what was refused and why, names the threshold, gives the next steps (`/model`, wait for the reset, pause autonomous runs), and states that nothing was sent. It uses markdown, so Desktop and gateways render it cleanly.
+- **Unavailable readings say what is wrong.** A missing, empty or stale reading names its cause in plain words, and points at `hermes usage --provider <id>`.
+- **Settings warnings tell the truth.** A malformed setting used to say "using default", while the guard in fact refused requests. Each warning now says that guarded requests are refused until the setting is fixed.
+- **Log lines are consistent.** Refusals log as `usage-guard refused …`; the first guarded dispatch logs `usage-guard active: gating providers …`.
+- **README rebuilt.** The top of the page now shows what the user will see, with screenshots and a short demo. The deep mechanics moved to `docs/reference.md`.
+- Test updated to the new refusal text. Host-contract check updated to the current core installer API (`PythonDeclaration` no longer has `is_member`).
+
 ## 0.3.9 — 2026-10-19
 
 A snapshot is no longer called stale before the guard is allowed to replace it. The freshness window is now `max(max_cache_age_s, the source's read floor)` — the value the README already described as the effective cadence.

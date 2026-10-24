@@ -1,5 +1,5 @@
 name: usage-guard
-version: 0.3.9
+version: 0.4.0
 description: "Keeps a Hermes agent inside its subscription allowance: refuses a provider call once a usage window is exhausted, so paid extra usage is never spent."
 author: mister-ideas
 license: MIT
