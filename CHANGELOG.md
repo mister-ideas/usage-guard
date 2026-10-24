@@ -2,6 +2,10 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.4.1 — 2026-10-24
+
+Docs only. The repository now keeps only media that the README embeds: the unlinked demo video (`docs/media/demo.mp4`) and the unused `docs/social-preview.png` are removed. No code change.
+
 ## 0.4.0 — 2026-10-24
 
 Clearer messages and a rewritten README. No change to what is gated, when, or how it is decided.

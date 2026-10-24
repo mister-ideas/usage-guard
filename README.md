@@ -10,8 +10,6 @@
 
 ## See it
 
-[▶ Demo video (13 s, MP4)](docs/media/demo.mp4): the install, then the three messages you will see. The video is rendered from the plugin's real message text; it is not a screen recording of the Desktop app.
-
 ![Install and enable from the terminal](docs/media/shot-install.png)
 
 **When the wall is hit.** Nothing is sent, and the message says what to do next.
