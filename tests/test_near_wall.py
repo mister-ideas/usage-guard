@@ -97,8 +97,9 @@ def test_notice_off_when_levels_empty_and_without_provider(guard):
 
 
 def test_refusal_tells_autonomous_loops_to_pause(guard):
-    assert "autonomous loops" in guard._EXHAUSTED_NOTICE
-    assert "usage_guard_blocked" not in guard._EXHAUSTED_NOTICE
+    assert "Autonomous runs" in guard._NOTICE_REFUSED
+    assert "pause until the reset" in guard._NOTICE_REFUSED
+    assert "usage_guard_blocked" not in guard._NOTICE_REFUSED
 
 
 def test_register_adds_request_shaper_and_notice_hook(guard):

@@ -41,5 +41,8 @@ def test_hermes_installer_sees_no_python_declaration():
         sys.path.insert(0, CORE)
     declarations = importlib.import_module("pm.plugin_declarations")
     declaration = declarations.read_python_declaration(ROOT)
-    assert declaration.is_member is False
-    assert declaration.install_requirements == ()
+    # Current core API: a plugin is a dependency "member" only when it has a pyproject
+    # that installs something, or requirements. usage-guard has none of these.
+    assert declaration.pyproject is None
+    assert declaration.requirements == ()
+    assert declaration.pyproject_installs is False

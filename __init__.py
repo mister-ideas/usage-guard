@@ -129,21 +129,63 @@ DEFAULTS: dict[str, Any] = {
     "max_tokens_near_wall": 0,
 }
 
-_NOTICE_HEADER = (
-    "⏸️ Usage guard blocked this request: the {source} usage data source "
-    "reports an exhausted window for provider {provider}."
+# Chat-facing refusals. Desktop and gateways render these as markdown.
+_NOTICE_REFUSED = (
+    "⏸ **usage-guard did not send this request** to `{provider}`.\n\n"
+    "**Why:** {why}. Your limit is set to refuse at {threshold:.0f}% used.\n\n"
+    "**What to do**\n"
+    "- Switch to a provider that is not guarded with `/model`.\n"
+    "- Or wait for the reset: the next fresh reading lifts this refusal.\n"
+    "- Autonomous runs (`/goal`, cron) should pause until the reset instead of retrying.\n\n"
+    "Nothing was sent, so no paid overage was spent."
 )
-_EXHAUSTED_NOTICE = (
-    "{windows} — the request was not sent to the provider. "
-    "Switch /model to another provider or wait for the reset. "
-    "This is a usage-limit stop, not a task result: autonomous loops "
-    "(/goal, cron) should pause until the reset instead of retrying."
+_NOTICE_UNAVAILABLE = (
+    "⏸ **usage-guard did not send this request** to `{provider}`: it cannot confirm your "
+    "remaining allowance, because {reason}.\n\n"
+    "**What to do**\n"
+    "- This is usually temporary. Check the reading with `hermes usage --provider {provider}`.\n"
+    "- To send requests while the reading is unavailable, set `fail_open: true`. This turns "
+    "the check off for every guarded provider.\n\n"
+    "Nothing was sent."
 )
-_UNAVAILABLE_NOTICE = (
-    "Usage guard could not confirm remaining allowance for provider {provider} "
-    "({reason}); fail-open is disabled, so the request was not sent to the "
-    "provider. Fix the usage data source; do not disable safety checks to bypass this refusal."
+_NOTICE_CONFIG = (
+    "⏸ **usage-guard did not send this request**: its settings are invalid. The "
+    "`plugins.usage-guard` log names the setting.\n\n"
+    "**What to do:** fix `plugins.entries.usage-guard.settings`, or turn the plugin off with "
+    "`hermes plugins disable usage-guard`. Nothing was sent."
 )
+_NOTICE_INTERNAL = (
+    "⏸ **usage-guard did not send this request** after an internal error. The details are in "
+    "the `plugins.usage-guard` log. It refused as a precaution, so nothing was sent."
+)
+_NOTICE_MALFORMED = (
+    "⏸ **usage-guard did not send this request**: the request payload was malformed. "
+    "Nothing was sent."
+)
+_NOTICE_MOA = (
+    "⏸ **usage-guard did not send this request**: the MoA preset could not be resolved, so "
+    "its providers cannot be checked against the usage policy. Check the `moa` section of "
+    "config.yaml. Nothing was sent."
+)
+
+# Plain-language causes for the unavailable-evidence notice.
+_REASON_TEXT = {
+    "fetch-error": "the usage endpoint did not answer",
+    "no fresh snapshot": "there is no recent usage reading yet",
+    "invalid allowance evidence": "the usage reading is empty or unreadable",
+    "invalid window": "a usage window in the reading is malformed",
+    "unconfirmed reset": "a window's reset time has passed and no fresh reading has confirmed it",
+    "Codex server limit": "Codex reports its limit is already reached",
+}
+
+
+def _describe_reason(reason: str) -> str:
+    if reason in _REASON_TEXT:
+        return _REASON_TEXT[reason]
+    if reason.startswith("malformed"):
+        return "the usage data is malformed (see the plugins.usage-guard log)"
+    return "the usage data reports an unrecognised state (see the plugins.usage-guard log)"
+
 
 _CACHE_DIRNAME = "usage-guard"
 _CACHE_FILENAME = "usage.json"
@@ -498,8 +540,8 @@ def _warn_stale_evidence_once(source_key: str, age: float) -> None:
             return
         _stale_evidence_warned.add(source_key)
     LOG.warning(
-        "usage-guard: serving the last usage snapshot for %s (%.0fs old) because the usage "
-        "endpoint is rate-limiting or failing; the exhaustion check still applies to it.",
+        "usage-guard: using the last usage reading for %s (%.0fs old) because the usage endpoint "
+        "is rate-limiting or failing; the limit check still applies to that reading.",
         source_key, age,
     )
 
@@ -539,7 +581,7 @@ def _failure_record(source_key: str, previous: dict[str, Any], exc: BaseExceptio
         backoff_s *= 1.0 + _BACKOFF_JITTER * ((uuid.uuid4().int % 1000) / 1000.0)
         record["backoff_until"] = (_now_utc() + timedelta(seconds=backoff_s)).isoformat()
         LOG.warning(
-            "usage-guard: usage endpoint rate-limited the refresh for %s; backing off %.0fs",
+            "usage-guard: the usage endpoint rate-limited %s; pausing refreshes for %.0fs (the last good reading still applies)",
             source_key, backoff_s,
         )
     return record
@@ -748,7 +790,7 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         keys = _clean_string_list(raw_keys)
         if keys is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed provider_keys %r; using default", raw_keys)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "provider_keys", raw_keys)
         else:
             settings["provider_keys"] = keys
 
@@ -756,7 +798,7 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         sources = _clean_sources(raw_sources)
         if sources is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed provider_sources %r; using default", raw_sources)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "provider_sources", raw_sources)
         else:
             settings["provider_sources"] = sources
 
@@ -764,42 +806,42 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         scales = _clean_scales(raw_scales)
         if scales is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed source_scales %r; using default", raw_scales)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "source_scales", raw_scales)
         else:
             settings["source_scales"] = scales
 
         threshold = _threshold(get_config("threshold_percent", DEFAULTS["threshold_percent"]))
         if threshold is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed threshold_percent; using default")
+            LOG.warning("usage-guard: setting %s is invalid; guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "threshold_percent")
         else:
             settings["threshold_percent"] = threshold
 
         max_age = _max_age(get_config("max_cache_age_s", DEFAULTS["max_cache_age_s"]))
         if max_age is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed max_cache_age_s; using default")
+            LOG.warning("usage-guard: setting %s is invalid; guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "max_cache_age_s")
         else:
             settings["max_cache_age_s"] = max_age
 
         poll_wait = _max_age(get_config("poll_wait_timeout_s", DEFAULTS["poll_wait_timeout_s"]))
         if poll_wait is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed poll_wait_timeout_s; using default")
+            LOG.warning("usage-guard: setting %s is invalid; guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "poll_wait_timeout_s")
         else:
             settings["poll_wait_timeout_s"] = poll_wait
 
         stale_grace = _max_age(get_config("stale_grace_s", DEFAULTS["stale_grace_s"]))
         if stale_grace is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed stale_grace_s; using default")
+            LOG.warning("usage-guard: setting %s is invalid; guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "stale_grace_s")
         else:
             settings["stale_grace_s"] = stale_grace
 
         min_interval = _max_age(get_config("min_fetch_interval_s", DEFAULTS["min_fetch_interval_s"]))
         if min_interval is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed min_fetch_interval_s; using default")
+            LOG.warning("usage-guard: setting %s is invalid; guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "min_fetch_interval_s")
         else:
             settings["min_fetch_interval_s"] = min_interval
 
@@ -807,14 +849,14 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         intervals = _clean_intervals(raw_intervals)
         if intervals is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed source_min_intervals %r; using default", raw_intervals)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "source_min_intervals", raw_intervals)
         else:
             settings["source_min_intervals"] = intervals
 
         fail_open = get_config("fail_open", DEFAULTS["fail_open"])
         if not isinstance(fail_open, bool):
             config_ok = False
-            LOG.warning("usage-guard: malformed fail_open %r; using default", fail_open)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "fail_open", fail_open)
         else:
             settings["fail_open"] = fail_open
 
@@ -822,28 +864,28 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         warn = _clean_levels(raw_warn)
         if warn is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed warn_percents %r; using default", raw_warn)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "warn_percents", raw_warn)
         else:
             settings["warn_percents"] = warn
 
         near = _threshold(get_config("near_wall_percent", DEFAULTS["near_wall_percent"]))
         if near is None:
             config_ok = False
-            LOG.warning("usage-guard: malformed near_wall_percent; using default")
+            LOG.warning("usage-guard: setting %s is invalid; guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "near_wall_percent")
         else:
             settings["near_wall_percent"] = near
 
         cap = get_config("max_tokens_near_wall", DEFAULTS["max_tokens_near_wall"])
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
             config_ok = False
-            LOG.warning("usage-guard: malformed max_tokens_near_wall %r; using default", cap)
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "max_tokens_near_wall", cap)
         else:
             settings["max_tokens_near_wall"] = cap
 
 
     except Exception:
         config_ok = False
-        LOG.warning("usage-guard: configuration unreadable; defaults + deny apply")
+        LOG.warning("usage-guard: settings could not be read; guarded requests are refused until plugins.entries.usage-guard.settings is fixed")
     return settings, config_ok
 
 
@@ -902,7 +944,7 @@ def _warn_undeclared_source_once(source_key: str, record: Any) -> None:
             return
         _undeclared_sources_warned.add(source_key)
     LOG.warning(
-        "usage-guard: source %s is not declared in source_scales and reports only values <= 1; "
+        "usage-guard: source %s is not declared in source_scales and reports only values <= 1, so "
         "they are read as percentages (1.0 = 1%% used). If this source reports fractions, "
         "declare it in source_scales as 'fraction'.",
         source_key,
@@ -923,8 +965,8 @@ def _warn_no_usage_surface_once(source_key: str, reason: str) -> None:
         return
     _no_usage_surface_warned.add(source_key)
     LOG.warning(
-        "usage-guard: source %s reports no account usage to guard (%s); requests for its "
-        "providers are not gated. Remove the provider from provider_keys to silence this.",
+        "usage-guard: source %s reports no account usage to guard (%s), so requests for its "
+        "providers are not gated. Remove the provider from provider_keys to silence this message.",
         source_key, reason,
     )
 
@@ -948,7 +990,7 @@ def _log_gating_once(settings: dict[str, Any]) -> None:
             return
         _gating_logged = True
     LOG.info(
-        "usage-guard: gating providers %s (sources: %s); threshold %.0f%%, fail_open=%s",
+        "usage-guard active: gating providers %s (usage sources: %s); threshold %.0f%% used, fail_open=%s",
         list(settings["provider_keys"]), dict(settings["provider_sources"]),
         settings["threshold_percent"], settings["fail_open"],
     )
@@ -961,8 +1003,8 @@ def _log_ungated_once(provider: str) -> None:
             return
         _ungated_logged.add(provider)
     LOG.info(
-        "usage-guard: provider %r is not gated (not listed in provider_keys); its requests "
-        "pass through untouched", provider,
+        "usage-guard: provider %r is not gated (not listed in provider_keys), so its requests "
+        "pass through unchanged", provider,
     )
 
 
@@ -1056,7 +1098,7 @@ def _decide_provider(
             return _Decision(True, reason=reason)
         return _Decision(
             False,
-            _UNAVAILABLE_NOTICE.format(provider=provider, reason=reason),
+            _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason(reason)),
             reason=reason,
         )
 
@@ -1083,7 +1125,7 @@ def _decide_provider(
             return _Decision(True, reason=reason)
         return _Decision(
             False,
-            _UNAVAILABLE_NOTICE.format(provider=provider, reason=reason),
+            _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason(reason)),
             reason=reason,
         )
 
@@ -1101,26 +1143,26 @@ def _decide_provider(
         # above accepts a within-grace snapshot whose latest refresh failed
         # (``ok`` false, windows carried forward), so a populated window list is
         # the actual requirement.
-        return _Decision(False, "Usage guard: usable allowance evidence is missing; the request was not sent.", "invalid allowance evidence")
+        return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("invalid allowance evidence")), "invalid allowance evidence")
     for window in windows:
         if not isinstance(window, dict):
-            return _Decision(False, "Usage guard: malformed allowance window; the request was not sent.", "invalid window")
+            return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("invalid window")), "invalid window")
         used = window.get("used_percent")
         reset = window.get("reset_at")
         if (isinstance(used, bool) or not isinstance(used, (int, float))
                 or not math.isfinite(used) or used < 0 or used > 100
                 or (reset is not None and _parse_ts(reset) is None)):
-            return _Decision(False, "Usage guard: malformed allowance window; the request was not sent.", "invalid window")
+            return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("invalid window")), "invalid window")
 
     if source_key == "openai-codex" and record.get("codex_rate_blocked") is True:
-        return _Decision(False, "Usage guard: Codex reports a blocked or reached limit; the request was not sent.", "Codex server limit")
+        return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("Codex server limit")), "Codex server limit")
 
     # A past reset is not proof of replenishment. Refuse until a new snapshot
     # reports a future reset rather than guessing an exhausted window cleared.
     for window in record.get("windows") or []:
         reset = _parse_ts(window.get("reset_at")) if isinstance(window, dict) else None
         if reset is not None and reset <= now:
-            return _Decision(False, "Usage guard: usage reset has not been confirmed by fresh data; the request was not sent.", "unconfirmed reset")
+            return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("unconfirmed reset")), "unconfirmed reset")
 
     hits = _exhausted_windows(record, settings["threshold_percent"], now)
     if not hits:
@@ -1131,12 +1173,14 @@ def _decide_provider(
         for w in hits
     )
     plan = record.get("plan")
-    header = _NOTICE_HEADER.format(
-        source=source_key, provider=f"{provider}" + (f" ({plan})" if plan else "")
-    )
+    who = f"{provider} ({plan})" if plan else provider
     return _Decision(
         False,
-        f"{header} {_EXHAUSTED_NOTICE.format(windows=windows_txt)}",
+        _NOTICE_REFUSED.format(
+            provider=who,
+            why=f"the subscription window{'s' if len(hits) > 1 else ''} {windows_txt} is used up",
+            threshold=settings["threshold_percent"],
+        ),
         reason=windows_txt,
     )
 
@@ -1381,14 +1425,13 @@ def _gate_moa(kwargs: dict[str, Any], settings: dict[str, Any], config_ok: bool,
     resolved = _moa_preset_slots(kwargs.get("model"))
     if resolved is None:
         if settings["fail_open"] and config_ok:
-            LOG.warning("usage-guard: could not resolve the MoA preset %r; allowing (fail_open)",
+            LOG.warning("usage-guard: could not resolve the MoA preset %r; allowing it because fail_open is true",
                         kwargs.get("model"))
             return downstream(request)
-        LOG.warning("usage-guard: could not resolve the MoA preset %r; denying", kwargs.get("model"))
+        LOG.warning("usage-guard: could not resolve the MoA preset %r; refusing it because its providers cannot be checked", kwargs.get("model"))
         return _blocked_response(
             kwargs.get("api_mode"), kwargs.get("model"),
-            "Usage guard: this MoA preset could not be resolved, so its providers could not be "
-            "checked against the usage policy; fail-open is disabled, so the request was not sent.",
+            _NOTICE_MOA,
         )
     preset_name, slot_providers = resolved
     for slot_provider in slot_providers:
@@ -1397,7 +1440,7 @@ def _gate_moa(kwargs: dict[str, Any], settings: dict[str, Any], config_ok: bool,
         source_key = settings["provider_sources"].get(slot_provider, slot_provider)
         decision = _decide_provider(slot_provider, source_key, settings, config_ok)
         if not decision.allow:
-            LOG.warning("usage-guard denied MoA preset=%s slot_provider=%s model=%s (%s)",
+            LOG.warning("usage-guard refused MoA preset=%s provider=%s model=%s: %s",
                         preset_name, slot_provider, kwargs.get("model"), decision.reason)
             return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
     return downstream(request)
@@ -1423,7 +1466,7 @@ def _blocked_response(api_mode: Any, model: Any, text: str) -> Any:
             usage=SimpleNamespace(input_tokens=0, output_tokens=0),
         )
     if api_mode != "chat_completions":
-        LOG.error("usage-guard blocked unrecognized api_mode; response may be rejected")
+        LOG.error("usage-guard: unrecognised api_mode; the refusal uses a generic shape, so the provider may reject it")
     return SimpleNamespace(
         usage_guard_blocked=True, id="usage-guard-block", object="chat.completion",
         created=int(time.time()), model=model,
@@ -1455,7 +1498,7 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
     request = kwargs.get("request")
     if not callable(next_call):
         return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"),
-                                 "Usage guard: malformed middleware payload.")
+                                 _NOTICE_MALFORMED)
     provider = kwargs.get("provider")
     provider = provider if isinstance(provider, str) and provider else ""
     if not provider:
@@ -1466,12 +1509,10 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
         # installed this plugin to prevent provider calls, so a broken policy
         # must never quietly disable the guard.
         if not config_ok:
-            LOG.warning("usage-guard: malformed configuration; denying request")
+            LOG.warning("usage-guard: settings are invalid; refusing the request (see the setting warning above)")
             return _blocked_response(
                 kwargs.get("api_mode"), kwargs.get("model"),
-                "Usage guard: its configuration is malformed, so the request was "
-                "not sent to the provider. Fix plugins.entries.usage-guard.settings "
-                "or remove/uninstall the plugin.",
+                _NOTICE_CONFIG,
             )
         if provider == "moa":
             _log_gating_once(settings)
@@ -1485,7 +1526,7 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
         decision = _decide_provider(provider, source_key, settings, config_ok)
         if decision.allow:
             return downstream(request)
-        LOG.warning("usage-guard denied provider=%s model=%s (%s)",
+        LOG.warning("usage-guard refused provider=%s model=%s: %s",
                     provider, kwargs.get("model"), decision.reason)
         return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
     except Exception:
@@ -1494,14 +1535,14 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
             # A call already dispatched must never be described as unsent.
             raise
         # Never raise into the fail-open dispatcher: deny with a notice.
-        LOG.exception("usage-guard: unexpected error; denying request")
+        LOG.exception("usage-guard: unexpected internal error; refusing the request as a precaution")
         try:
             return _blocked_response(
                 kwargs.get("api_mode"), kwargs.get("model"),
-                "Usage guard: internal error; the request was not sent to the provider.",
+                _NOTICE_INTERNAL,
             )
         except Exception:  # pragma: no cover - last-resort belt
-            LOG.exception("usage-guard: could not shape denial response")
+            LOG.exception("usage-guard: could not build the refusal response")
             raise
 
 
@@ -1585,7 +1626,7 @@ def shape_llm_request(config_reader: Callable[[str, Any], Any], **kwargs: Any) -
         return {"request": shaped, "source": "usage-guard",
                 "reason": f"output capped at {cap} tokens near the usage wall ({peak[0]:.0f}% used)"}
     except Exception:
-        LOG.warning("usage-guard: request shaping skipped", exc_info=True)
+        LOG.warning("usage-guard: could not apply the near-wall output cap; sending the request unchanged", exc_info=True)
         return None
 
 
@@ -1628,7 +1669,7 @@ def near_wall_notice(config_reader: Callable[[str, Any], Any], **kwargs: Any) ->
             "current work over starting long new tasks."
         )}
     except Exception:
-        LOG.warning("usage-guard: near-wall notice skipped", exc_info=True)
+        LOG.warning("usage-guard: could not build the near-wall warning; the request continues without it", exc_info=True)
         return None
 
 
