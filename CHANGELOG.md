@@ -2,6 +2,14 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.4.4 — 2026-10-26
+
+`assume_inflated_sources`, an opt-in reading of a host that scales sub-1% values by 100.
+
+Hermes's Anthropic fetcher calls `_usage_windows(..., fraction=True)`, which multiplies any `utilization <= 1` by 100. The endpoint reports percentages, so a window whose true value is 1% arrives as exactly 100 — the value a genuinely exhausted window reports. Nothing outside the host can tell the two apart, so the guard refused on a weekly window that was at 1% used. The upstream fix is [NousResearch/hermes-agent#139916](https://github.com/NousResearch/hermes-agent/pull/139916), unmerged.
+
+Naming a source in `assume_inflated_sources` (default `[]`, off) makes the guard read a window reporting exactly 100 as 1% for that source, and logs once what that costs. Two limits keep it narrow: it applies only to sources you name, and only to that one value — every reading below 100 keeps its meaning, where an inflated sub-1% value reads *high*, which errs towards caution rather than towards spending. The cost is the mirror image: a genuinely exhausted window reporting exactly 100 is read as 1% and allowed, so a request can cross the wall. It is meant to be removed once the upstream fix is in.
+
 ## 0.4.3 — 2026-10-26
 
 The guard can decide from a usage snapshot another reader already made, instead of spending a request of its own.
