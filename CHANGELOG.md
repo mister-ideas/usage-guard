@@ -2,6 +2,14 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.4.5 — 2026-10-26
+
+`assume_inflated_sources` is removed. It could not be made safe.
+
+Hermes's Anthropic fetcher multiplies any `utilization <= 1` by 100, so a window whose true value is 1% arrives as exactly 100 — the same value a genuinely exhausted window reports. 0.4.4 offered to read that one value as 1% for a source you named. On a real account both readings were then allowed: a genuinely exhausted weekly window *and* a genuinely exhausted 5-hour session, because nothing in the value distinguishes them, and the session window has genuinely reported exactly 100 in this account's history.
+
+The failure mode is the one this plugin exists to prevent, so the setting is gone rather than documented as risky: an ambiguous reading now refuses, which is the safe direction. Expect a false refusal while the host reports a sub-1% window as 100; it clears as the window's usage passes 1%. The defect and its upstream fix (NousResearch/hermes-agent#139916) are documented in the README and in this plugin's catalog entry.
+
 ## 0.4.4 — 2026-10-26
 
 `assume_inflated_sources`, an opt-in reading of a host that scales sub-1% values by 100.

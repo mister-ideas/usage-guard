@@ -117,11 +117,6 @@ DEFAULTS: dict[str, Any] = {
     "min_fetch_interval_s": 30.0,
     # False: deny on stale/missing/unavailable data (recommended). True: allow.
     "fail_open": False,
-    # Temporary interpretation for a host that scales sub-1% readings by 100 (the
-    # Anthropic fetcher does): for the sources named here, a window reporting
-    # exactly 100 is read as 1. Empty (the default) trusts the host. See the
-    # README: a genuinely exhausted window then reads as 1% too.
-    "assume_inflated_sources": [],
     # Near-the-wall behaviour. Both read the cache only (never the network).
     # Usage levels (percent used) at which a short note is added to the next
     # turn's context so the agent can wind down before the hard refusal. [] = off.
@@ -857,14 +852,6 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         else:
             settings["provider_sources"] = sources
 
-        raw_inflated = get_config("assume_inflated_sources", DEFAULTS["assume_inflated_sources"])
-        inflated = _clean_paths(raw_inflated)   # a list of non-empty strings, like the paths setting
-        if inflated is None:
-            config_ok = False
-            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "assume_inflated_sources", raw_inflated)
-        else:
-            settings["assume_inflated_sources"] = inflated
-
         raw_scales = get_config("source_scales", DEFAULT_SOURCE_SCALES)
         scales = _clean_scales(raw_scales)
         if scales is None:
@@ -1101,50 +1088,6 @@ def _scaled_record(record: Optional[dict[str, Any]], scale: str) -> Optional[dic
     return {**record, "windows": scaled}
 
 
-_inflation_warned: set[str] = set()
-
-
-def _warn_inflation_once(source_key: str) -> None:
-    """Say once that an ambiguous 100 is being read as the inflated form of 1."""
-    if source_key in _inflation_warned:
-        return
-    _inflation_warned.add(source_key)
-    LOG.warning(
-        "usage-guard: reading a window at exactly 100%% on %s as 1%% (assume_inflated_sources). "
-        "This interprets the host's sub-1%% scaling: a genuinely exhausted window reads the same "
-        "value and would be allowed. Remove the source from assume_inflated_sources once the host "
-        "reports these values unscaled.",
-        source_key,
-    )
-
-
-def _undo_host_inflation(record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Read a window reporting exactly 100 as the inflated form of 1.
-
-    The host's Anthropic fetcher multiplies any utilization <= 1 by 100, so a
-    window whose true value is 1% arrives as exactly 100 — the same value a
-    genuinely exhausted window reports, and nothing outside the host can tell
-    them apart. Two limits keep this narrow: it applies only to sources the user
-    names, and only to that one value. Every reading below 100 is left alone: an
-    inflated sub-1% value reads high, which makes the guard more cautious, not
-    less, so the only misreading that could cost money is the one this fixes.
-    """
-    if not isinstance(record, dict):
-        return record
-    windows = record.get("windows")
-    if not isinstance(windows, list):
-        return record
-    out: list[Any] = []
-    for window in windows:
-        if isinstance(window, dict):
-            used = window.get("used_percent")
-            if (isinstance(used, (int, float)) and not isinstance(used, bool)
-                    and math.isfinite(used) and float(used) == 100.0):
-                window = {**window, "used_percent": 1.0, "host_inflation": True}
-        out.append(window)
-    return {**record, "windows": out}
-
-
 def _borrowed_windows_ok(windows: Any) -> bool:
     """Every window must satisfy the guard's percentage contract.
 
@@ -1327,9 +1270,6 @@ def _decide_provider(
     if source_key not in settings["source_scales"]:
         _warn_undeclared_source_once(source_key, record)
     record = _scaled_record(record, source_scale)
-    if source_key in settings["assume_inflated_sources"]:
-        record = _undo_host_inflation(record)
-        _warn_inflation_once(source_key)
 
     windows = record.get("windows")
     if not isinstance(windows, list) or not windows:

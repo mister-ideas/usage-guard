@@ -85,7 +85,6 @@ Settings live under `plugins.entries.usage-guard.settings`. The defaults are saf
 | `provider_keys` | `["anthropic", "openai-codex"]` | Providers that are gated. Add custom provider IDs here |
 | `max_tokens_near_wall` | `0` | Output cap near the wall. `0` is off |
 | `hydrate_from_paths` | `[]` | Files to borrow a recent usage snapshot from, instead of spending a request of our own. Empty is off |
-| `assume_inflated_sources` | `[]` | Read a window reporting exactly 100 as 1% for the sources named. A temporary answer to a host that scales sub-1% readings; see the caveat in [docs/reference.md](docs/reference.md#configuration) |
 
 The full table, with every key and its meaning, is in [docs/reference.md#configuration](docs/reference.md#configuration).
 
@@ -94,7 +93,6 @@ The full table, with every key and its meaning, is in [docs/reference.md#configu
 - **It cannot recall a request that is already running.** A request that starts inside the allowance and spills into paid usage within the same provider call is billed. The guard stops the next request.
 - **It does not gate auxiliary calls on stock Hermes.** Compression, titles and background review are not covered. Core change [#140694](https://github.com/NousResearch/hermes-agent/pull/140694) would close that gap; it is open and not yet released.
 - **It reads the account, not the request.** With credential pools or per-session overrides, treat the reading as account-level evidence.
-- **`assume_inflated_sources` trades a false refusal for a possible missed wall.** The host's Anthropic fetcher scales any reading `<= 1` by 100, so a 1% window arrives as exactly 100 — indistinguishable from exhaustion. Naming the source reads that value as 1%, which stops the false refusal but would also let a *genuinely* exhausted window through. Use it only until the upstream fix ships, then remove it.
 - **It depends on undocumented usage endpoints** (Anthropic OAuth and Codex usage), which can change without notice.
 - **It shares the account's usage budget with everything else that reads it.** Those endpoints are limited per account, not per plugin, so a second reader with its own cadence — another plugin, the CLI, a script — can push the account into a 429 and leave the guard with nothing fresh to read. Its cache is a plain JSON file in its plugin data dir (`usage-guard/usage.json`: `windows` of `label`, `used_percent`, `reset_at`), and any reader may prefer that file to a request of its own: it is the cheapest way to keep one read per account per window. The same works in reverse: set `hydrate_from_paths` to a file another reader maintains and the guard borrows its reading instead of making its own request.
 

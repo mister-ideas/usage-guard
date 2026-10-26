@@ -321,52 +321,6 @@ def test_a_read_reporting_no_usage_surface_is_not_turned_into_a_failure(guard, t
     assert _OAUTH_ONLY_REASON in (record.get("unavailable_reason"), record.get("reason"))
 
 
-# ── the opt-in reading of a host-inflated 100 ───────────────────────────────
-# The host multiplies any utilization <= 1 by 100, so a window whose true value
-# is 1% arrives as exactly 100 — the value a genuinely exhausted window reports
-# too. Nothing outside the host can tell them apart, so the interpretation is
-# opt-in per source, and it touches only that one value.
-
-def test_an_inflated_100_is_read_as_1_for_a_named_source(guard):
-    _, calls = invoke(guard, make_record(100), provider="anthropic",
-                      assume_inflated_sources=["anthropic"])
-    assert calls == [{}], "the ambiguous 100 is read as 1% used, so the request passes"
-
-
-def test_a_100_is_still_exhaustion_without_the_opt_in(guard):
-    _, calls = invoke(guard, make_record(100), provider="anthropic")
-    assert calls == []
-
-
-def test_the_opt_in_only_touches_exactly_100(guard):
-    """Every reading below 100 keeps its meaning: an inflated sub-1% value reads
-    high, which errs towards caution rather than towards spending."""
-    kept = guard._undo_host_inflation(make_record(99.5))["windows"][0]
-    assert kept["used_percent"] == 99.5 and "host_inflation" not in kept
-    read = guard._undo_host_inflation(make_record(100))["windows"][0]
-    assert read["used_percent"] == 1.0 and read["host_inflation"] is True
-
-
-def test_the_opt_in_is_per_source(guard):
-    _, calls = invoke(guard, make_record(100), provider="openai-codex",
-                      assume_inflated_sources=["anthropic"])
-    assert calls == [], "openai-codex was not named"
-
-
-def test_the_opt_in_says_what_it_costs(guard, caplog):
-    guard._inflation_warned.clear()
-    with caplog.at_level("WARNING", logger="plugins.usage-guard"):
-        invoke(guard, make_record(10), provider="anthropic", assume_inflated_sources=["anthropic"])
-        invoke(guard, make_record(10), provider="anthropic", assume_inflated_sources=["anthropic"])
-    hits = [r.getMessage() for r in caplog.records if "as 1%" in r.getMessage()]
-    assert len(hits) == 1 and "genuinely exhausted" in hits[0]
-
-
-def test_a_malformed_inflated_setting_denies(guard):
-    settings, ok = guard._read_settings(lambda k, d: {"no": "list"} if k == "assume_inflated_sources" else d)
-    assert ok is False
-
-
 # ── borrowing a snapshot another reader already made ────────────────────────
 # The endpoints are budgeted per account, not per plugin, so a machine with two
 # readers overruns the budget. A file the user names can be read instead of
