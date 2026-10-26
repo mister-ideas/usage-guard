@@ -93,6 +93,7 @@ The full table, with every key and its meaning, is in [docs/reference.md#configu
 - **It does not gate auxiliary calls on stock Hermes.** Compression, titles and background review are not covered. Core change [#140694](https://github.com/NousResearch/hermes-agent/pull/140694) would close that gap; it is open and not yet released.
 - **It reads the account, not the request.** With credential pools or per-session overrides, treat the reading as account-level evidence.
 - **It depends on undocumented usage endpoints** (Anthropic OAuth and Codex usage), which can change without notice.
+- **It shares the account's usage budget with everything else that reads it.** Those endpoints are limited per account, not per plugin, so a second reader with its own cadence — another plugin, the CLI, a script — can push the account into a 429 and leave the guard with nothing fresh to read. Its cache is a plain JSON file in its plugin data dir (`usage-guard/usage.json`: `windows` of `label`, `used_percent`, `reset_at`), and any reader may prefer that file to a request of its own: it is the cheapest way to keep one read per account per window.
 
 Details: [docs/reference.md#what-stock-hermes-can-and-cannot-gate](docs/reference.md#what-stock-hermes-can-and-cannot-gate).
 

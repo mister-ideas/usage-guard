@@ -546,13 +546,20 @@ def _warn_stale_evidence_once(source_key: str, age: float) -> None:
     )
 
 
-def _failure_record(source_key: str, previous: dict[str, Any], exc: BaseException) -> dict[str, Any]:
+def _failure_record(
+    source_key: str, previous: dict[str, Any], exc: Optional[BaseException]
+) -> dict[str, Any]:
     """Build the record for a failed refresh WITHOUT discarding good evidence.
 
     The windows and their ``fetched_at`` are carried forward: a rate limit says
     nothing about allowance, and ``_decide_provider`` decides how long the last
-    good snapshot stays usable (``stale_grace_s``). Only a 429 sets a backoff,
-    which suppresses new reads rather than refusing requests.
+    good snapshot stays usable (``stale_grace_s``).
+
+    A backoff is set on a 429 — from ``Retry-After`` when the host passes one —
+    and on an empty read that raised nothing at all (``exc`` is None). The host
+    reports a rate limit and a missing credential the same way, so the guard
+    cannot tell them apart, and backing off is the safe reading of both. A
+    backoff suppresses new reads rather than refusing requests.
     """
     failures = previous.get("consecutive_failures")
     failures = failures + 1 if isinstance(failures, int) and not isinstance(failures, bool) else 1
@@ -568,7 +575,7 @@ def _failure_record(source_key: str, previous: dict[str, Any], exc: BaseExceptio
         if carried in previous:
             record[carried] = previous[carried]
     status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status == 429:
+    if status == 429 or exc is None:
         retry_after = (getattr(getattr(exc, "response", None), "headers", {}) or {}).get("Retry-After")
         try:
             requested = float(retry_after) if retry_after else 0.0
@@ -580,10 +587,18 @@ def _failure_record(source_key: str, previous: dict[str, Any], exc: BaseExceptio
         # the desktop backend and the gateway sharing one endpoint.
         backoff_s *= 1.0 + _BACKOFF_JITTER * ((uuid.uuid4().int % 1000) / 1000.0)
         record["backoff_until"] = (_now_utc() + timedelta(seconds=backoff_s)).isoformat()
-        LOG.warning(
-            "usage-guard: the usage endpoint rate-limited %s; pausing refreshes for %.0fs (the last good reading still applies)",
-            source_key, backoff_s,
-        )
+        if status == 429:
+            LOG.warning(
+                "usage-guard: the usage endpoint rate-limited %s; pausing refreshes for %.0fs "
+                "(the last good reading still applies)",
+                source_key, backoff_s,
+            )
+        else:
+            LOG.warning(
+                "usage-guard: the read for %s came back empty; keeping the last reading (%.0fs old) "
+                "and pausing refreshes for %.0fs",
+                source_key, _evidence_age_s(previous, _now_utc()) or 0.0, backoff_s,
+            )
     return record
 
 
@@ -647,8 +662,19 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
         try:
             snapshot = fetcher()
             record = _snapshot_record(snapshot)
-            if record.get("ok") and not record.get("unavailable_reason") and not record.get("windows"):
-                record = {"ok": False, "reason": "no-usable-windows"}
+            if not record.get("windows"):
+                # An empty read is not evidence about allowance: the host reports a
+                # rate limit and a missing credential the same way, so the guard
+                # cannot tell them apart. When there is a snapshot to carry, carry
+                # it (windows + fetched_at + a backoff) so the exhaustion interlock
+                # keeps applying to the last good evidence and a rate limit stops
+                # refusing requests. With nothing to carry the record stands as
+                # read, keeping the existing fail-closed policy.
+                record = (_failure_record(source_key, previous, None)
+                          if previous.get("windows")
+                          else {"ok": False, "reason": "no-usable-windows"}
+                          if record.get("ok") and not record.get("unavailable_reason")
+                          else record)
         except Exception as exc:
             LOG.debug("usage-guard poll for %s failed", source_key, exc_info=True)
             # A failed refresh keeps the last good evidence and never refuses a

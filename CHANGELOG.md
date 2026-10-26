@@ -2,6 +2,16 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.4.2 — 2026-10-26
+
+An empty read no longer erases the usage evidence the guard already has.
+
+The host reports a rate limit and a missing credential the same way: a read that returns nothing and raises nothing. The guard recorded that as `no-data` and replaced the record wholesale, so one 429 — or an expired sign-in — destroyed the last good snapshot and every later dispatch refused with *"could not confirm remaining allowance"* until a read happened to succeed. That contradicted the plugin's own `stale_grace_s` policy, which exists precisely to keep deciding on the last good reading.
+
+Now, when a read comes back empty and there is a snapshot to carry, the guard carries it: the same windows and `fetched_at`, marked `fetch-error`, with a backoff from the same growth schedule a 429 uses. The exhaustion interlock keeps applying to that snapshot, so an exhausted window still refuses; the carried snapshot stops being usable after `stale_grace_s`, so a credential that never comes back degrades to refusal; and with nothing to carry the record stands as read, so the guard stays fail-closed. A read the host reports as having no usage surface is left untouched, and those providers still pass through.
+
+The guard's cache is also documented as a shared read-only source (README, "Privacy and disclosure"), so a plugin reading the same account usage can prefer that file over a request of its own — the endpoint's budget is per account, not per plugin.
+
 ## 0.4.1 — 2026-10-24
 
 Docs only. The repository now keeps only media that the README embeds: the unlinked demo video (`docs/media/demo.mp4`) and the unused `docs/social-preview.png` are removed. No code change.

@@ -243,6 +243,83 @@ def test_past_reset_denies_until_fresh_confirmation(guard):
     assert calls == []
 
 
+# ── an empty read keeps the last good snapshot ──────────────────────────────
+# The host reports a rate limit and a missing credential the same way: an empty
+# read that raised nothing. Erasing the evidence on either made one 429 refuse
+# every later dispatch until a read happened to succeed.
+
+def _seed_previous(guard, monkeypatch, tmp_path, record):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    guard._write_cache({"providers": {"anthropic": dict(record, last_attempt_at=record["fetched_at"])}})
+
+
+def test_an_empty_read_keeps_the_last_good_snapshot(guard, tmp_path, monkeypatch):
+    previous = make_record(10)
+    _seed_previous(guard, monkeypatch, tmp_path, previous)
+    guard._spawn_poll("anthropic", lambda: None, sync_timeout_s=5.0)
+    record = guard._read_cache()["providers"]["anthropic"]
+    assert record["windows"] == previous["windows"]
+    assert record["fetched_at"] == previous["fetched_at"]
+    assert record["unavailable_reason"] == "fetch-error"
+    assert record["consecutive_failures"] == 1
+    assert record["backoff_until"]
+
+
+def test_an_empty_read_allows_while_the_window_is_not_exhausted(guard, tmp_path, monkeypatch):
+    _seed_previous(guard, monkeypatch, tmp_path, make_record(10))
+    guard._spawn_poll("anthropic", lambda: None, sync_timeout_s=5.0)
+    decision = guard._decide_provider("anthropic", "anthropic", dict(guard.DEFAULTS), True, spawn_poll=False)
+    assert decision.allow is True
+
+
+def test_an_empty_read_still_denies_an_exhausted_window(guard, tmp_path, monkeypatch):
+    """The interlock keeps applying to the snapshot that was carried."""
+    _seed_previous(guard, monkeypatch, tmp_path, make_record(100))
+    guard._spawn_poll("anthropic", lambda: None, sync_timeout_s=5.0)
+    decision = guard._decide_provider("anthropic", "anthropic", dict(guard.DEFAULTS), True, spawn_poll=False)
+    assert decision.allow is False
+
+
+def test_an_empty_read_with_nothing_to_carry_stays_fail_closed(guard, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    guard._spawn_poll("anthropic", lambda: None, sync_timeout_s=5.0)
+    record = guard._read_cache()["providers"]["anthropic"]
+    assert not record.get("windows")
+    decision = guard._decide_provider("anthropic", "anthropic", dict(guard.DEFAULTS), True, spawn_poll=False)
+    assert decision.allow is False
+
+
+def test_the_carried_snapshot_stops_applying_after_the_grace_window(guard, tmp_path, monkeypatch):
+    """A credential that never comes back must not be trusted for ever."""
+    old = (NOW - timedelta(seconds=1000)).isoformat()
+    _seed_previous(guard, monkeypatch, tmp_path, make_record(10, fetched_at=old))
+    guard._spawn_poll("anthropic", lambda: None, sync_timeout_s=5.0)
+    decision = guard._decide_provider("anthropic", "anthropic", dict(guard.DEFAULTS), True, spawn_poll=False)
+    assert decision.allow is False
+
+
+def test_an_empty_read_pauses_refreshes(guard, tmp_path, monkeypatch):
+    """The backoff stops the guard hammering an endpoint that is failing."""
+    _seed_previous(guard, monkeypatch, tmp_path, make_record(10))
+    guard._spawn_poll("anthropic", lambda: None, sync_timeout_s=5.0)
+    spawned = []
+    with patch.object(guard, "_spawn_poll_for_source", side_effect=lambda *a, **k: spawned.append(a)):
+        guard._decide_provider("anthropic", "anthropic", dict(guard.DEFAULTS), True)
+    assert spawned == []
+
+
+def test_a_read_reporting_no_usage_surface_is_not_turned_into_a_failure(guard, tmp_path, monkeypatch):
+    """A core-reported reason with no windows is left as read: that provider is
+    expected to pass through, and there was nothing to carry anyway."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    snapshot = NS(fetched_at=NOW, unavailable_reason=_OAUTH_ONLY_REASON, plan=None, raw={}, windows=[])
+    guard._spawn_poll("anthropic", lambda: snapshot, sync_timeout_s=5.0)
+    record = guard._read_cache()["providers"]["anthropic"]
+    assert not record.get("windows")
+    assert not record.get("backoff_until")
+    assert _OAUTH_ONLY_REASON in (record.get("unavailable_reason"), record.get("reason"))
+
+
 # ── raw payload ingestion (all published windows reach the gate) ─────────────
 
 @pytest.mark.parametrize("bucket", ["seven_day_oauth_apps", "seven_day_overage_included",
