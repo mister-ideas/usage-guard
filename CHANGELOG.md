@@ -2,6 +2,16 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.4.3 — 2026-10-26
+
+The guard can decide from a usage snapshot another reader already made, instead of spending a request of its own.
+
+The account-usage endpoints are budgeted per account, not per plugin. On a machine with two readers — this guard and another plugin, the CLI, a script — each keeps its own cadence, and together they overrun the budget: a burst against the Anthropic endpoint returns `429` with `Retry-After`, and every reader is then left with nothing fresh.
+
+Set `hydrate_from_paths` to one or more JSON files and the guard reads them before it would fetch, when its own record is not fresh. The shape is the plugin's own cache (`providers.<source>.windows` of `label`, `used_percent`, `reset_at`, plus `fetched_at`, with a file-level `fetched_at` accepted as a fallback), so any reader can produce a compatible file. Foreign data is validated rather than trusted: an out-of-range `used_percent` is rejected, an old `fetched_at` is ignored, an unreadable path is skipped with a debug line, and a borrowed snapshot is never written into the guard's cache. The exhaustion interlock applies to whatever it returns, so a borrowed window at the threshold still refuses.
+
+Off by default: with no paths configured, nothing changes.
+
 ## 0.4.2 — 2026-10-26
 
 An empty read no longer erases the usage evidence the guard already has.

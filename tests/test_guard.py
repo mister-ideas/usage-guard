@@ -5,6 +5,7 @@ from the repository root and every provider callback is local. Host-dependent
 behavior (agent.* imports, auxiliary middleware) lives in test_host_contract.py
 and skips when the Hermes tree is not importable.
 """
+import json
 import os
 import threading
 import time
@@ -318,6 +319,80 @@ def test_a_read_reporting_no_usage_surface_is_not_turned_into_a_failure(guard, t
     assert not record.get("windows")
     assert not record.get("backoff_until")
     assert _OAUTH_ONLY_REASON in (record.get("unavailable_reason"), record.get("reason"))
+
+
+# ── borrowing a snapshot another reader already made ────────────────────────
+# The endpoints are budgeted per account, not per plugin, so a machine with two
+# readers overruns the budget. A file the user names can be read instead of
+# spending a request — off by default, and the interlock still applies.
+
+def _shared_file(tmp_path, *, used=10.0, fetched_at=None, provider="anthropic"):
+    path = tmp_path / "shared-usage.json"
+    path.write_text(json.dumps({
+        "fetched_at": fetched_at or NOW.isoformat(),
+        "providers": {provider: {
+            "fetched_at": fetched_at or NOW.isoformat(),
+            "windows": [{"label": "Current week", "used_percent": used,
+                         "reset_at": RESET}]}}}), encoding="utf-8")
+    return path
+
+
+def _decide_with_borrow(guard, path, record=None, **settings):
+    spawned = []
+    policy = dict(guard.DEFAULTS, hydrate_from_paths=[str(path)] if path else [], **settings)
+    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": record} if record else {}}), \
+         patch.object(guard, "_spawn_poll_for_source", side_effect=lambda *a, **k: spawned.append(a)):
+        decision = guard._decide_provider("anthropic", "anthropic", policy, True)
+    return decision, spawned
+
+
+def test_a_borrowed_snapshot_is_used_instead_of_reading_the_endpoint(guard, tmp_path):
+    decision, spawned = _decide_with_borrow(guard, _shared_file(tmp_path, used=10.0))
+    assert decision.allow is True
+    assert spawned == [], "a borrowed fresh snapshot must not cost a request"
+
+
+def test_a_borrowed_snapshot_still_denies_an_exhausted_window(guard, tmp_path):
+    """The interlock applies to whatever record is read, borrowed included."""
+    decision, _ = _decide_with_borrow(guard, _shared_file(tmp_path, used=100.0))
+    assert decision.allow is False
+
+
+def test_a_borrowed_snapshot_outside_the_window_is_ignored(guard, tmp_path):
+    old = (NOW - timedelta(hours=1)).isoformat()
+    decision, spawned = _decide_with_borrow(guard, _shared_file(tmp_path, used=10.0, fetched_at=old))
+    assert len(spawned) == 1, "stale foreign evidence is not used: read the endpoint"
+
+
+def test_a_borrowed_snapshot_out_of_range_is_rejected(guard, tmp_path):
+    """Foreign data on another scale must not read as a free window."""
+    decision, spawned = _decide_with_borrow(guard, _shared_file(tmp_path, used=1.0))
+    assert decision.allow is True  # 1.0 on our scale is 1% used
+    decision, spawned = _decide_with_borrow(guard, _shared_file(tmp_path, used=150.0))
+    assert len(spawned) == 1, "an out-of-range window is rejected, not compared"
+
+
+def test_borrowing_is_off_by_default(guard, tmp_path):
+    path = _shared_file(tmp_path, used=10.0)
+    decision, spawned = _decide_with_borrow(guard, None)   # no paths configured
+    assert len(spawned) == 1, "without hydrate_from_paths the guard reads the endpoint"
+    assert path.exists()
+
+
+def test_an_unreadable_borrow_path_is_ignored(guard, tmp_path):
+    decision, spawned = _decide_with_borrow(guard, tmp_path / "does-not-exist.json")
+    assert len(spawned) == 1
+
+
+def test_a_single_borrow_path_may_be_given_as_a_string(guard):
+    settings, ok = guard._read_settings(lambda k, d: "/tmp/shared-usage.json" if k == "hydrate_from_paths" else d)
+    assert ok is True and settings["hydrate_from_paths"] == ["/tmp/shared-usage.json"]
+
+
+def test_a_malformed_borrow_setting_denies(guard):
+    """A broken policy denies by design, like every other malformed setting."""
+    settings, ok = guard._read_settings(lambda k, d: {"not": "a list"} if k == "hydrate_from_paths" else d)
+    assert ok is False
 
 
 # ── raw payload ingestion (all published windows reach the gate) ─────────────

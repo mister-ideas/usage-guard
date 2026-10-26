@@ -127,6 +127,11 @@ DEFAULTS: dict[str, Any] = {
     # answers, so it is opt-in).
     "near_wall_percent": 90.0,
     "max_tokens_near_wall": 0,
+    # Files to borrow a usage snapshot from when our own record is not fresh, so
+    # the guard can decide without spending a request. The endpoints are budgeted
+    # per account, not per plugin: on a machine with another reader, whoever read
+    # last holds the fresher numbers. Empty (the default) disables borrowing.
+    "hydrate_from_paths": [],
 }
 
 # Chat-facing refusals. Desktop and gateways render these as markdown.
@@ -776,6 +781,25 @@ def _source_interval(source_key: str, settings: dict[str, Any]) -> float:
     return float(settings["min_fetch_interval_s"])
 
 
+def _clean_paths(raw: Any) -> Optional[list[str]]:
+    """A list of file paths, or None when the setting is malformed.
+
+    Paths are not checked here: a file that is missing, unreadable or foreign is
+    a runtime condition, ignored with a debug line, not a broken policy.
+    """
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if not isinstance(raw, (list, tuple)):
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return None
+        if item.strip():
+            out.append(item.strip())
+    return out
+
+
 def _threshold(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -885,6 +909,14 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
             LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "fail_open", fail_open)
         else:
             settings["fail_open"] = fail_open
+
+        raw_borrow = get_config("hydrate_from_paths", DEFAULTS["hydrate_from_paths"])
+        borrow = _clean_paths(raw_borrow)
+        if borrow is None:
+            config_ok = False
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "hydrate_from_paths", raw_borrow)
+        else:
+            settings["hydrate_from_paths"] = borrow
 
         raw_warn = get_config("warn_percents", DEFAULTS["warn_percents"])
         warn = _clean_levels(raw_warn)
@@ -1056,6 +1088,75 @@ def _scaled_record(record: Optional[dict[str, Any]], scale: str) -> Optional[dic
     return {**record, "windows": scaled}
 
 
+def _borrowed_windows_ok(windows: Any) -> bool:
+    """Every window must satisfy the guard's percentage contract.
+
+    A borrowed file is foreign data, so an out-of-range value is rejected rather
+    than compared: a file written on a 0-1 scale must not read as an exhausted
+    window, nor as a free one.
+    """
+    if not isinstance(windows, list) or not windows:
+        return False
+    for window in windows:
+        if not isinstance(window, dict):
+            return False
+        used = window.get("used_percent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)):
+            return False
+        if not 0.0 <= float(used) <= 100.0:
+            return False
+    return True
+
+
+_borrowed_warned: set[str] = set()
+
+
+def _warn_borrowed_once(source_key: str, path: str) -> None:
+    """Name the file a decision borrowed from, once per source and file."""
+    key = f"{source_key}\x00{path}"
+    if key in _borrowed_warned:
+        return
+    _borrowed_warned.add(key)
+    LOG.info(
+        "usage-guard: using the snapshot in %s for %s instead of reading the endpoint",
+        path, source_key,
+    )
+
+
+def _borrow_snapshot(
+    source_key: str, settings: dict[str, Any], max_age_s: float, now: datetime
+) -> Optional[tuple[dict[str, Any], str]]:
+    """A recent record for this source from a file the user named, or None.
+
+    The usage endpoints are budgeted per account, not per plugin, so a machine
+    with two readers overruns the budget and whoever read last holds the fresher
+    numbers. This reads a file the user points at — any file carrying the
+    documented shape — instead of spending a request of our own. It is off by
+    default (``hydrate_from_paths`` is empty), consulted only when our own record
+    is not fresh, never written into our cache, and the exhaustion interlock
+    applies to whatever it returns.
+    """
+    for raw_path in settings.get("hydrate_from_paths") or ():
+        path = os.path.expanduser(str(raw_path))
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            LOG.debug("usage-guard: could not read the snapshot at %s", path, exc_info=True)
+            continue
+        providers = data.get("providers") if isinstance(data, dict) else None
+        record = providers.get(source_key) if isinstance(providers, dict) else None
+        if not isinstance(record, dict) or not _borrowed_windows_ok(record.get("windows")):
+            continue
+        candidate = dict(record)
+        if not candidate.get("fetched_at"):
+            candidate["fetched_at"] = data.get("fetched_at")   # a file-level stamp
+        if not _fresh(candidate, max_age_s, now):
+            continue
+        return candidate, path
+    return None
+
+
 def _decide_provider(
     provider: str, source_key: str, settings: dict[str, Any], config_ok: bool,
     now: Optional[datetime] = None, spawn_poll: bool = True,
@@ -1088,7 +1189,14 @@ def _decide_provider(
     )
 
     if not backing_off and not _fresh(record, fresh_window, now):
-        if spawn_poll:
+        # Before spending a request, take a recent reading someone else already
+        # made if the user pointed us at one. Whoever read last has the fresher
+        # numbers, and the endpoint's budget is shared by account.
+        borrowed = _borrow_snapshot(source_key, settings, fresh_window, now)
+        if borrowed is not None:
+            record, borrowed_path = borrowed
+            _warn_borrowed_once(source_key, borrowed_path)
+        elif spawn_poll:
             # Refresh bounded-synchronously so the decision uses fresh data
             # instead of denying the first request after the cache ages out.
             # Concurrent callers — same process or another — share this one
