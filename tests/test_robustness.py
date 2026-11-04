@@ -168,3 +168,19 @@ def test_failed_refresh_keeps_deciding_on_the_last_windows(guard):
             lambda k, d: policy.get(k, d), provider="anthropic", model="offline",
             api_mode="chat_completions", request={}, next_call=calls.append)
     assert calls == [{}]
+
+
+def test_poll_thread_inherits_the_callers_context(guard):
+    # Hermes scopes per-turn secrets in a ContextVar (agent/secret_scope.py).
+    # Under a multiplexed gateway a bare thread starts with an empty context, so
+    # the fetcher's get_secret() raised UnscopedSecretError and every read came
+    # back as a failure. The poll must run inside a copy of the caller's context.
+    import contextvars
+    scope = contextvars.ContextVar("usage_guard_test_scope", default=None)
+    seen = []
+    token = scope.set("turn-secrets")
+    try:
+        guard._spawn_poll("ctx-probe", lambda: seen.append(scope.get()), sync_timeout_s=2.0)
+    finally:
+        scope.reset(token)
+    assert seen == ["turn-secrets"]

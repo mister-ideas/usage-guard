@@ -120,3 +120,26 @@ def test_moa_config_surface_available():
     preset = cfg["presets"]["default"]
     assert preset["reference_models"][0]["provider"] == "anthropic"
     assert preset["aggregator"]["provider"] == "fireworks"
+
+
+def test_poll_reads_secrets_under_a_multiplexed_gateway(guard):
+    """Regression for 0.4.x: the usage read ran on a bare thread with an empty
+    context, so under multiplexing the core's get_secret() raised
+    UnscopedSecretError. Uses the real secret_scope module."""
+    scope = importlib.import_module("agent.secret_scope")
+    seen = []
+
+    def fetch():
+        try:
+            seen.append(scope.get_secret("UG_PROBE_TOKEN"))
+        except scope.UnscopedSecretError as exc:  # the 0.4.x failure
+            seen.append(exc)
+
+    mux = scope.set_multiplex_context(True)
+    secrets = scope.set_secret_scope({"UG_PROBE_TOKEN": "per-turn"})
+    try:
+        guard._spawn_poll("ctx-host-probe", fetch, sync_timeout_s=5.0)
+    finally:
+        scope.reset_secret_scope(secrets)
+        scope.reset_multiplex_context(mux)
+    assert seen == ["per-turn"]

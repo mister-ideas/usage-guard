@@ -2,6 +2,16 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.5.0 — unreleased
+
+See what the guard would decide, and a reliability fix for multiplexed gateways.
+
+- **`/usage-guard`** in any session prints the decision for each guarded provider: ok, near the limit, blocked (with the reason), or allowed without a reading when `fail_open` is on, followed by every window's used percentage and reset time.
+- **Desktop status-bar chip.** A shield next to the bar's other chips shows the highest window across guarded providers. It turns yellow inside the near-wall zone, orange when `fail_open` lets a request through without a reading, and red with "blocked" when the guard refuses. The tooltip lists every window. It refreshes every minute and after each finished turn.
+- Both answer from the guard's own cache file (a new read-only `GET /api/plugins/usage-guard/status` route backs the chip), so checking the status never spends a request against a usage endpoint whose budget the guard itself depends on. They report the same decision function the middleware uses, so the view cannot drift from the behaviour. A missing reading shows as blocked, matching the fail-closed default.
+- **Fix: usage reads failed under a multiplexed gateway.** The background usage read ran on a bare thread, which starts with an empty `contextvars` context. Hermes scopes per-turn secrets in context variables, so under a gateway serving several profiles the read raised `UnscopedSecretError`, every read came back as a failure and, with the default fail-closed policy, requests were refused. The read now runs inside a copy of the caller's context. A regression test pins it.
+- CI now runs every offline test file (the near-the-wall tests were previously left out of the CI run) and adds a Node job for the Desktop chip.
+
 ## 0.4.5 — 2026-10-26
 
 `assume_inflated_sources` is removed. It could not be made safe.

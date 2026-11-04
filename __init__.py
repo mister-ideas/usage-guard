@@ -30,6 +30,7 @@ missing plugins, and credential mismatches remain outside this guard.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import math
@@ -697,8 +698,13 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
                 _poll_inflight.discard(source_key)
 
     try:
+        # Run inside a copy of the caller's context: Hermes scopes per-turn
+        # secrets in ContextVars, and a bare thread starts with an empty context,
+        # so under a multiplexed gateway the fetcher's get_secret() would raise
+        # UnscopedSecretError and every read would fail.
+        context = contextvars.copy_context()
         thread = threading.Thread(
-            target=_run, name=f"usage-guard-poll-{source_key}", daemon=True
+            target=context.run, args=(_run,), name=f"usage-guard-poll-{source_key}", daemon=True
         )
         thread.start()
         if sync_timeout_s > 0.0:
@@ -1807,6 +1813,107 @@ def near_wall_notice(config_reader: Callable[[str, Any], Any], **kwargs: Any) ->
         return None
 
 
+# ── status view (/usage-guard, Desktop chip) ────────────────────────────────
+
+# Worst first: the overall state is the most severe provider state.
+# "idle" (never asked about) ranks last and only shows when every provider is idle.
+_STATE_RANK = {"blocked": 0, "unverified": 1, "near": 2, "passthrough": 3, "ok": 4, "idle": 5}
+
+
+def _status_windows(record: Any, settings: dict[str, Any], source_key: str) -> list[dict[str, Any]]:
+    record = _scaled_record(record if isinstance(record, dict) else None,
+                            settings["source_scales"].get(source_key, "percent"))
+    windows: list[dict[str, Any]] = []
+    for window in (record or {}).get("windows") or []:
+        used = window.get("used_percent") if isinstance(window, dict) else None
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+            continue
+        windows.append({"label": str(window.get("label") or "window"), "used_percent": float(used),
+                        "reset_at": window.get("reset_at"), "resets": _fmt_reset(window)})
+    return windows
+
+
+def _provider_status(provider: str, settings: dict[str, Any], config_ok: bool, now: datetime) -> dict[str, Any]:
+    source_key = settings["provider_sources"].get(provider, provider)
+    record = _read_cache().get("providers", {}).get(source_key)
+    windows = _status_windows(record, settings, source_key)
+    peak = max((w["used_percent"] for w in windows), default=None)
+    if not config_ok:
+        decision = _Decision(False, _NOTICE_CONFIG, "invalid settings")
+    elif record is None:
+        # No record at all: no request has gone to this provider yet. The first
+        # one triggers a read and is decided on it, so "blocked" would be wrong.
+        return {"provider": provider, "source": source_key, "state": "idle", "reason": "",
+                "notice": "", "peak_percent": None, "windows": [], "evidence_age_s": None}
+    else:
+        # spawn_poll=False: the view only reports, it never spends a read.
+        decision = _decide_provider(provider, source_key, settings, config_ok, now=now, spawn_poll=False)
+    if not decision.allow:
+        state = "blocked"
+    elif decision.reason.startswith("no account usage surface"):
+        state = "passthrough"
+    elif decision.reason:
+        state = "unverified"
+    elif peak is not None and peak >= settings["near_wall_percent"]:
+        state = "near"
+    else:
+        state = "ok"
+    age = _evidence_age_s(record if isinstance(record, dict) else None, now)
+    return {"provider": provider, "source": source_key, "state": state, "reason": decision.reason,
+            "notice": decision.notice, "peak_percent": peak, "windows": windows,
+            "evidence_age_s": None if age is None else round(age, 1)}
+
+
+def guard_status(config_reader: Callable[[str, Any], Any]) -> dict[str, Any]:
+    """What the guard would decide for each guarded provider, from the cache only."""
+    settings, config_ok = _read_settings(config_reader)
+    now = _now_utc()
+    providers = [_provider_status(p, settings, config_ok, now) for p in settings["provider_keys"]]
+    overall = min((p["state"] for p in providers), key=_STATE_RANK.__getitem__, default="ok")
+    return {"state": overall, "config_ok": config_ok, "threshold_percent": settings["threshold_percent"],
+            "near_wall_percent": settings["near_wall_percent"], "fail_open": settings["fail_open"],
+            "providers": providers, "checked_at": now.isoformat()}
+
+
+_STATE_TEXT = {
+    "ok": "ok", "near": "near the limit", "blocked": "BLOCKED",
+    "unverified": "allowed without a reading (fail_open)", "passthrough": "not guarded (no usage surface)",
+    "idle": "not used yet (its first request is checked before it is sent)",
+}
+
+
+def format_status(status: dict[str, Any]) -> str:
+    lines = [f"**usage-guard**: refuses at {status['threshold_percent']:.0f}% used"
+             + (", fail_open is ON" if status.get("fail_open") else "")]
+    for p in status["providers"]:
+        lines.append(f"\n`{p['provider']}`: {_STATE_TEXT.get(p['state'], p['state'])}")
+        for w in p["windows"]:
+            lines.append(f"- {w['label']}: {w['used_percent']:.0f}% used, resets {w['resets']}")
+        if not p["windows"] and p["state"] != "idle":
+            lines.append("- no usage reading")
+        if p["state"] in ("blocked", "unverified") and p["reason"]:
+            lines.append(f"- reason: {p['reason']}")
+    return "\n".join(lines)
+
+
+def hermes_config_reader() -> Callable[[str, Any], Any]:
+    """A settings reader for callers without a plugin ctx (the dashboard route).
+
+    Reads ``plugins.entries.usage-guard.settings`` (legacy ``config``) the way
+    ``ctx.get_config`` does. An unreadable config yields defaults, and the
+    view then reports what those defaults would decide.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+    except Exception:
+        config = {}
+    entry = ((config.get("plugins") or {}).get("entries") or {}).get("usage-guard") or {}
+    values = entry.get("settings") if isinstance(entry.get("settings"), dict) else entry.get("config")
+    values = values if isinstance(values, dict) else {}
+    return lambda key, default=None: values.get(key, default)
+
+
 def register(ctx) -> None:
     def middleware(**kwargs: Any) -> Any:
         return gate_llm_execution(ctx.get_config, **kwargs)
@@ -1820,3 +1927,16 @@ def register(ctx) -> None:
     ctx.register_middleware("llm_execution", middleware)
     ctx.register_middleware("llm_request", request_shaper)
     ctx.register_hook("pre_llm_call", pre_llm_call)
+
+    def status_command(raw_args: str = "") -> str:
+        # Cache-only: answering never spends a read of the usage endpoint.
+        return format_status(guard_status(ctx.get_config))
+
+    # Feature-detected so a host without slash-command support still loads the
+    # guard itself; the guard never depends on the view.
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command(
+            "usage-guard", status_command,
+            description="Show what usage-guard would decide right now, per guarded provider",
+        )

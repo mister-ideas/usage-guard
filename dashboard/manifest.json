@@ -1,0 +1,8 @@
+{
+  "name": "usage-guard",
+  "label": "Usage guard",
+  "version": "0.5.0",
+  "description": "Status of the usage guard: what it would decide right now for each guarded provider.",
+  "tab": { "hidden": true },
+  "api": "plugin_api.py"
+}

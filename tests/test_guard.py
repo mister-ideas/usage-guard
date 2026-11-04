@@ -673,11 +673,15 @@ def test_manifest_declares_exactly_what_register_adds(guard):
     import yaml
     manifest = yaml.safe_load(_root().joinpath("plugin.yaml").read_text(encoding="utf-8"))
     assert manifest["name"] == "usage-guard"
-    seen = {"mw": [], "hooks": [], "tools": []}
+    seen = {"mw": [], "hooks": [], "tools": [], "commands": []}
 
     class Ctx:
         def get_config(self, key, default=None):
             return default
+
+        def register_command(self, name, handler, description="", **k):
+            seen["commands"].append(name)
+            assert handler() and description
 
         def register_middleware(self, kind, fn):
             seen["mw"].append(kind)
@@ -692,6 +696,7 @@ def test_manifest_declares_exactly_what_register_adds(guard):
     assert sorted(manifest["provides_middleware"]) == sorted(seen["mw"])
     assert sorted(manifest["provides_hooks"]) == sorted(seen["hooks"])
     assert manifest["provides_tools"] == [] and seen["tools"] == []
+    assert seen["commands"] == ["usage-guard"]
     assert manifest.get("requires_env") in (None, [])
 
 
@@ -1148,7 +1153,7 @@ def test_the_plugin_depends_only_on_hermes_public_surfaces(guard):
             modules.add(node.module.split(".")[0])
     hermes = {"agent", "hermes_cli", "plugins"}
     stdlib = {
-        "__future__", "contextlib", "datetime", "fcntl", "json", "logging", "math",
+        "__future__", "contextlib", "contextvars", "datetime", "fcntl", "json", "logging", "math",
         "msvcrt", "os", "threading", "time", "types", "typing", "uuid",
     }
     assert modules <= hermes | stdlib, sorted(modules - (hermes | stdlib))
