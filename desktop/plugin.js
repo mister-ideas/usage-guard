@@ -7,11 +7,13 @@
 // endpoint. The guard itself (the Python half) works with or without this chip.
 import { jsx, jsxs } from "react/jsx-runtime";
 import { useEffect, useState } from "react";
-import { Codicon, Tip, host } from "@hermes/plugin-sdk";
+import { Codicon, Tip, host, useValue } from "@hermes/plugin-sdk";
 import * as sdk from "@hermes/plugin-sdk";
 
 const STATUSBAR_RIGHT = (sdk.STATUSBAR_AREAS && sdk.STATUSBAR_AREAS.right) || "statusBar.right";
 const POLL_MS = 60000;
+// Atom fallback for a Desktop without `host.state.profile`.
+const NO_PROFILE = { get: () => "", subscribe: () => () => {}, listen: () => () => {} };
 
 // Colours come from the host theme only, so the chip follows light and dark.
 const TONE = {
@@ -50,7 +52,12 @@ function chipModel(status) {
 
 function GuardChip({ ctx }) {
   const [status, setStatus] = useState(null);
+  // ctx.rest is scoped to the active profile. A profile without usage-guard
+  // enabled answers 404 and the chip hides; re-read at once when the profile
+  // changes instead of waiting for the next minute's poll.
+  const profile = useValue((host.state && host.state.profile) || NO_PROFILE);
   useEffect(() => {
+    setStatus(null);
     let gone = false;
     let timer;
     const load = async () => {
@@ -66,7 +73,7 @@ function GuardChip({ ctx }) {
     // A finished turn is when a fresh reading is most likely: refresh then too.
     const off = typeof host.onEvent === "function" ? host.onEvent("message.complete", () => { clearTimeout(timer); load(); }) : null;
     return () => { gone = true; clearTimeout(timer); if (typeof off === "function") off(); };
-  }, [ctx]);
+  }, [ctx, profile]);
   const model = chipModel(status);
   if (model.state === "unknown") return null;
   const color = TONE[model.state] || TONE.ok;

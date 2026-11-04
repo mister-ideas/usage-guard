@@ -12,4 +12,4 @@ async function mod(name, code) {
 await mod('react', 'export const useState = (v) => [v, () => {}]; export const useEffect = () => {}; export default {}')
 await fs.writeFile(path.join(nm, 'react', 'jsx-runtime.mjs'), 'export const jsx = (type, props) => ({ type, props }); export const jsxs = jsx')
 await fs.writeFile(path.join(nm, 'react', 'package.json'), JSON.stringify({ name: 'react', type: 'module', exports: { '.': './index.mjs', './jsx-runtime': './jsx-runtime.mjs' } }))
-await mod('@hermes/plugin-sdk', "const C = ({ children }) => children ?? null; export const Codicon = C, Tip = C; export const host = { onEvent: () => () => {} }; export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' }")
+await mod('@hermes/plugin-sdk', "const C = ({ children }) => children ?? null; export const Codicon = C, Tip = C; export const host = { onEvent: () => () => {}, state: {} }; export const useValue = (a) => (a && typeof a.get === 'function' ? a.get() : ''); export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' }")
