@@ -1318,7 +1318,8 @@ def _decide_provider(
         False,
         _NOTICE_REFUSED.format(
             provider=who,
-            why=f"the subscription window{'s' if len(hits) > 1 else ''} {windows_txt} is used up",
+            why=(f"the subscription windows {windows_txt} have reached your limit" if len(hits) > 1
+                 else f"the subscription window {windows_txt} has reached your limit"),
             threshold=settings["threshold_percent"],
         ),
         reason=windows_txt,
@@ -1887,12 +1888,17 @@ def format_status(status: dict[str, Any]) -> str:
              + (", fail_open is ON" if status.get("fail_open") else "")]
     for p in status["providers"]:
         lines.append(f"\n`{p['provider']}`: {_STATE_TEXT.get(p['state'], p['state'])}")
+        over = p["state"] == "blocked"
         for w in p["windows"]:
-            lines.append(f"- {w['label']}: {w['used_percent']:.0f}% used, resets {w['resets']}")
+            mark = " ← at or over the limit" if over and w["used_percent"] >= status["threshold_percent"] else ""
+            lines.append(f"- {w['label']}: {w['used_percent']:.0f}% used, resets {w['resets']}{mark}")
         if not p["windows"] and p["state"] != "idle":
             lines.append("- no usage reading")
-        if p["state"] in ("blocked", "unverified") and p["reason"]:
-            lines.append(f"- reason: {p['reason']}")
+        # A refusal on the windows is already shown by the marks above; any other
+        # reason (no reading, invalid settings, fail_open) is spelled out.
+        if p["state"] in ("blocked", "unverified") and p["reason"] and not any(
+                over and w["used_percent"] >= status["threshold_percent"] for w in p["windows"]):
+            lines.append(f"- reason: {_describe_reason(p['reason'])}")
     return "\n".join(lines)
 
 

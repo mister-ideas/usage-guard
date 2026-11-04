@@ -104,3 +104,28 @@ def test_a_source_without_a_usage_surface_passes_through(guard):
     # guard lets requests through, and the view says so instead of "blocked".
     out = status(guard, {"anthropic": failed("api-key-account")})
     assert entry(out, "anthropic")["state"] == "passthrough"
+
+
+def test_slash_command_marks_the_window_over_the_limit_without_repeating_it(guard):
+    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": record(100, 40)}}), \
+         patch.object(guard, "_spawn_poll_for_source"):
+        text = guard.format_status(guard.guard_status(reader(guard)))
+    assert "Session: 100% used" in text and "← at or over the limit" in text
+    assert text.count("← at or over the limit") == 1  # the 40% window is not marked
+    assert "reason:" not in text  # the mark already says why
+
+
+def test_slash_command_spells_out_a_failed_reading(guard):
+    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": failed()}}), \
+         patch.object(guard, "_spawn_poll_for_source"):
+        text = guard.format_status(guard.guard_status(reader(guard)))
+    assert "reason: the usage endpoint did not answer" in text
+
+
+def test_refusal_grammar_singular_and_plural(guard):
+    one = status(guard, {"anthropic": record(100, 40)})
+    both = status(guard, {"anthropic": record(100, 100)})
+    assert "window Session: 100% used" in entry(one, "anthropic")["notice"]
+    assert "has reached your limit" in entry(one, "anthropic")["notice"]
+    assert "have reached your limit" in entry(both, "anthropic")["notice"]
+    assert "is used up" not in entry(both, "anthropic")["notice"]

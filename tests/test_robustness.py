@@ -184,3 +184,10 @@ def test_poll_thread_inherits_the_callers_context(guard):
     finally:
         scope.reset(token)
     assert seen == ["turn-secrets"]
+
+
+def test_the_suite_never_writes_the_real_usage_cache(guard):
+    import os
+    from pathlib import Path
+    real = Path(os.path.expanduser("~")) / ".hermes" / "plugin-data" / "usage-guard" / "usage.json"
+    assert Path(guard._cache_path()).resolve() != real.resolve()
