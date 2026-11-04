@@ -149,7 +149,9 @@ def test_slash_command_spells_out_a_failed_reading(guard):
 def test_refusal_grammar_singular_and_plural(guard):
     one = status(guard, {"anthropic": record(100, 40)})
     both = status(guard, {"anthropic": record(100, 100)})
-    assert "window Session: 100% used" in entry(one, "anthropic")["notice"]
-    assert "has reached your limit" in entry(one, "anthropic")["notice"]
-    assert "have reached your limit" in entry(both, "anthropic")["notice"]
-    assert "is used up" not in entry(both, "anthropic")["notice"]
+    one_notice, both_notice = entry(one, "anthropic")["notice"], entry(both, "anthropic")["notice"]
+    # Reads as a sentence: "Your Session window is at 100% used (resets …)".
+    assert "Your Session window is at 100% used (resets " in one_notice
+    assert "Weekly" not in one_notice  # the 40% window is not named
+    assert "Your Session and Weekly windows are at 100% and 100% used" in both_notice
+    assert "is used up" not in both_notice and "window Session:" not in both_notice

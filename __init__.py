@@ -1318,12 +1318,23 @@ def _decide_provider(
         False,
         _NOTICE_REFUSED.format(
             provider=who,
-            why=(f"the subscription windows {windows_txt} have reached your limit" if len(hits) > 1
-                 else f"the subscription window {windows_txt} has reached your limit"),
+            why=_why_refused(hits),
             threshold=settings["threshold_percent"],
         ),
         reason=windows_txt,
     )
+
+
+def _why_refused(hits: list[dict[str, Any]]) -> str:
+    """One sentence naming the windows at or over the limit, with their reset."""
+    labels = [str(w.get("label") or "usage") for w in hits]
+    pcts = [f"{float(w.get('used_percent') or 0):.0f}%" for w in hits]
+    resets = sorted({_fmt_reset(w) for w in hits})
+    if len(hits) == 1:
+        return f"Your {labels[0]} window is at {pcts[0]} used (resets {resets[0]})"
+    names = ", ".join(labels[:-1]) + " and " + labels[-1]
+    amounts = ", ".join(pcts[:-1]) + " and " + pcts[-1]
+    return f"Your {names} windows are at {amounts} used (resets {', '.join(resets)})"
 
 
 def _claim_fetch_slot(source_key: str, min_interval_s: float) -> bool:
