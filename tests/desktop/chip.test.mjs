@@ -31,3 +31,8 @@ test('a provider never used is named as such and does not raise the peak', () =>
   const m = chipModel(status('ok', [p('anthropic', 'ok', 30), p('openai-codex', 'idle')]))
   assert.equal(m.text, '30%'); assert.match(m.tip, /openai-codex: not used yet$/m)
 })
+
+test('an old reading under the limit keeps the percentage and says it is old', () => {
+  const m = chipModel(status('stale', [p('anthropic', 'stale', 33, 21)]))
+  assert.equal(m.text, '33%'); assert.match(m.tip, /anthropic: reading is old, refreshed before the next request/)
+})

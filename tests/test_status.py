@@ -91,6 +91,30 @@ def test_overall_state_is_the_worst_provider(guard):
     assert out["state"] == "near"
 
 
+def test_an_old_reading_is_stale_not_blocked(guard):
+    # The view never spends a read, but the guard refreshes before the next
+    # request. An old reading under the limit must not paint "blocked".
+    old = (NOW - timedelta(hours=1)).isoformat()
+    out = status(guard, {"anthropic": record(33, 21, fetched_at=old)})
+    anthropic = entry(out, "anthropic")
+    assert anthropic["state"] == "stale"
+    assert anthropic["peak_percent"] == 33 and len(anthropic["windows"]) == 2
+    assert out["state"] == "stale"
+
+
+def test_an_old_reading_over_the_limit_is_still_blocked(guard):
+    old = (NOW - timedelta(hours=1)).isoformat()
+    assert entry(status(guard, {"anthropic": record(100, fetched_at=old)}), "anthropic")["state"] == "blocked"
+
+
+def test_slash_command_output_is_plain_text(guard):
+    # Desktop shows command output as plain text: no markdown markers.
+    with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": record(30)}}), \
+         patch.object(guard, "_spawn_poll_for_source"):
+        text = guard.format_status(guard.guard_status(reader(guard)))
+    assert "`" not in text and "**" not in text
+
+
 def test_slash_command_prints_a_readable_summary(guard):
     with patch.object(guard, "_read_cache", return_value={"providers": {"anthropic": record(100, 40)}}), \
          patch.object(guard, "_spawn_poll_for_source"):

@@ -20,15 +20,17 @@ const TONE = {
   ok: "var(--ui-text-tertiary)",
   passthrough: "var(--ui-text-tertiary)",
   idle: "var(--ui-text-tertiary)",
+  stale: "var(--ui-text-tertiary)",
   near: "var(--ui-yellow)",
   unverified: "var(--ui-orange)",
   blocked: "var(--ui-red)",
 };
-const ICON = { idle: "shield", ok: "shield", passthrough: "shield", near: "warning", unverified: "warning", blocked: "debug-pause" };
+const ICON = { stale: "shield", idle: "shield", ok: "shield", passthrough: "shield", near: "warning", unverified: "warning", blocked: "debug-pause" };
 
 const STATE_TEXT = {
   ok: "ok", near: "near the limit", blocked: "blocked", unverified: "allowed without a reading (fail_open)",
   passthrough: "not guarded (no usage surface)", idle: "not used yet",
+  stale: "reading is old, refreshed before the next request",
 };
 
 // Pure: the chip's text and tooltip from a /status payload. Exported for tests.

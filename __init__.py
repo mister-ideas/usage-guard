@@ -1818,7 +1818,7 @@ def near_wall_notice(config_reader: Callable[[str, Any], Any], **kwargs: Any) ->
 
 # Worst first: the overall state is the most severe provider state.
 # "idle" (never asked about) ranks last and only shows when every provider is idle.
-_STATE_RANK = {"blocked": 0, "unverified": 1, "near": 2, "passthrough": 3, "ok": 4, "idle": 5}
+_STATE_RANK = {"blocked": 0, "unverified": 1, "near": 2, "stale": 3, "passthrough": 4, "ok": 5, "idle": 6}
 
 
 def _status_windows(record: Any, settings: dict[str, Any], source_key: str) -> list[dict[str, Any]]:
@@ -1849,7 +1849,13 @@ def _provider_status(provider: str, settings: dict[str, Any], config_ok: bool, n
     else:
         # spawn_poll=False: the view only reports, it never spends a read.
         decision = _decide_provider(provider, source_key, settings, config_ok, now=now, spawn_poll=False)
-    if not decision.allow:
+    over = peak is not None and peak >= settings["threshold_percent"]
+    if not decision.allow and decision.reason == "no fresh snapshot" and windows and not over:
+        # The last reading is old but under the limit. The guard reads again
+        # before the next request is sent; the view itself never spends a read,
+        # so it reports "stale", not a refusal that would not happen.
+        state = "stale"
+    elif not decision.allow:
         state = "blocked"
     elif decision.reason.startswith("no account usage surface"):
         state = "passthrough"
@@ -1880,14 +1886,15 @@ _STATE_TEXT = {
     "ok": "ok", "near": "near the limit", "blocked": "BLOCKED",
     "unverified": "allowed without a reading (fail_open)", "passthrough": "not guarded (no usage surface)",
     "idle": "not used yet (its first request is checked before it is sent)",
+    "stale": "reading is old; refreshed before the next request",
 }
 
 
 def format_status(status: dict[str, Any]) -> str:
-    lines = [f"**usage-guard**: refuses at {status['threshold_percent']:.0f}% used"
+    lines = [f"usage-guard: refuses at {status['threshold_percent']:.0f}% used"
              + (", fail_open is ON" if status.get("fail_open") else "")]
     for p in status["providers"]:
-        lines.append(f"\n`{p['provider']}`: {_STATE_TEXT.get(p['state'], p['state'])}")
+        lines.append(f"\n{p['provider']}: {_STATE_TEXT.get(p['state'], p['state'])}")
         over = p["state"] == "blocked"
         for w in p["windows"]:
             mark = " ← at or over the limit" if over and w["used_percent"] >= status["threshold_percent"] else ""
