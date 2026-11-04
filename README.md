@@ -50,7 +50,7 @@ hermes plugins update usage-guard
 hermes plugins remove usage-guard
 ```
 
-Restart Hermes after an update. The catalog pins one reviewed commit, so an update reaches you only after a maintainer merges the new pin.
+Restart Hermes after an update: the gateway for the guard itself, and Hermes Desktop's backend (or the whole app) for the status chip, whose route is mounted when the backend starts. The catalog pins one reviewed commit, so an update reaches you only after a maintainer merges the new pin.
 
 ## What it does
 
@@ -112,6 +112,7 @@ Subscription plans now bill extra usage once a window is exhausted, and on many 
 | Refused, notice says its settings are invalid | A setting has the wrong shape. A broken policy refuses by design rather than silently disabling the guard. | Fix `plugins.entries.usage-guard.settings`, or run `hermes plugins disable usage-guard`. The `plugins.usage-guard` log line names the setting. |
 | Refused: "cannot confirm your remaining allowance" | The usage reading is missing, empty or stale beyond `stale_grace_s` (900s). The notice names the cause. | Run `hermes usage --provider <id>` to check the reading. Read the `plugins.usage-guard` log for detail. Set `fail_open: true` only if you accept sending without a reading. |
 | What would it decide right now? | — | Run `/usage-guard` in a session, or hover the shield chip in the Desktop status bar. Both answer from the cached reading and show the reason for any refusal. |
+| The Desktop chip does not appear | The chip hides when its status route does not answer. Hermes Desktop's backend mounts plugin routes when it starts, so a plugin installed or updated while it runs is not served yet. | Restart Hermes Desktop (or its backend), then run ⌘K → **Reload desktop plugins**. |
 | It never blocks | The provider may not be listed in `provider_keys`, the window may genuinely be under the threshold, or the call may not be gated at all. | Check the log: the guard logs `usage-guard active: gating providers [...]` on its first guarded dispatch, and names each provider that passes through because it is not gated. See also [What stock Hermes can and cannot gate](docs/reference.md#what-stock-hermes-can-and-cannot-gate). |
 | "reports no account usage to guard" warning | The account has no subscription usage surface — an Anthropic API-key account publishes no limits on the OAuth usage endpoint. | Expected: the provider passes through rather than being blocked. Remove it from `provider_keys` to silence the warning. |
 | "usage endpoint rate-limiting" messages | The usage endpoint answered 429. The guard backs off (honouring `Retry-After`) and keeps deciding on the last good snapshot. | Nothing — a rate limit never refuses a request. Raising a floor or refreshing harder only deepens the backoff. |
