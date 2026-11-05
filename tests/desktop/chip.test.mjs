@@ -1,6 +1,7 @@
 // The chip's text/tooltip model, run against the real plugin.js with a stub SDK.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { chipModel } from '../../desktop/plugin.js'
 
 const status = (state, providers, extra = {}) => ({ state, threshold_percent: 100, fail_open: false, providers, ...extra })
@@ -46,4 +47,19 @@ test('a 100% that may really be 1% is named as such, and the gauge shows the con
   assert.match(m.tip, /Current session 100% \(may really be 1%; resets in 3h\)/)
   assert.doesNotMatch(m.tip, /fail_open/, 'an unconfirmed 100% is not a fail_open pass')
   assert.match(m.tip, /anthropic: allowed, the 100% is unconfirmed/)
+})
+
+test('providers that read the same account are listed once, naming each provider', () => {
+  const sub = { ...p('claude-subscription-directsdk-experimental', 'blocked', 20, 27), source: 'anthropic' }
+  const api = { ...p('anthropic', 'blocked', 20, 27), source: 'anthropic' }
+  const m = chipModel(status('blocked', [sub, api, { ...p('openai-codex', 'idle'), source: 'openai-codex' }]))
+  const lines = m.tip.split('\n')
+  assert.equal(lines.filter(l => /Session 20%/.test(l)).length, 1, 'one entry per account')
+  assert.match(m.tip, /anthropic \(claude-subscription-directsdk-experimental, anthropic\): blocked · Session 20%/)
+  assert.match(m.tip, /openai-codex: not used yet/)
+})
+
+test('the tooltip keeps one line per entry', () => {
+  const src = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+  assert.match(src, /label: jsx\("span", \{ style: \{ whiteSpace: "pre-line" \}, children: model\.tip \}\)/)
 })

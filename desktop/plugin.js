@@ -44,7 +44,15 @@ function chipModel(status) {
   const text = state === "blocked" ? "blocked" : peak === null ? "guard" : `${Math.round(peak)}%`;
   const lines = [`usage-guard refuses at ${Math.round(status.threshold_percent)}% used`];
   if (status.fail_open) lines.push("fail_open is ON");
+  // Providers that read the same account (one usage source) share one entry.
+  const groups = [];
   for (const p of status.providers) {
+    const source = p.source || p.provider;
+    const g = groups.find((x) => x.source === source);
+    if (g) g.names.push(p.provider); else groups.push({ source, names: [p.provider], p });
+  }
+  for (const { source, names, p: first } of groups) {
+    const p = { ...first, provider: names.length > 1 ? `${source} (${names.join(", ")})` : names[0] };
     // Hermes reports a 1% Anthropic window as 100% (hermes-agent#139916): the guard
     // does not treat such a lone 100% as full, and the tooltip says so.
     const windows = (p.windows || []).map((w) => w.ambiguous
@@ -85,7 +93,7 @@ function GuardChip({ ctx }) {
   if (model.state === "unknown") return null;
   const color = TONE[model.state] || TONE.ok;
   return jsx(Tip, {
-    label: model.tip,
+    label: jsx("span", { style: { whiteSpace: "pre-line" }, children: model.tip }),
     children: jsxs("span", {
       role: "status",
       "aria-label": model.tip,
