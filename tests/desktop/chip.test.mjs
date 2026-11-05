@@ -36,3 +36,14 @@ test('an old reading under the limit keeps the percentage and says it is old', (
   const m = chipModel(status('stale', [p('anthropic', 'stale', 33, 21)]))
   assert.equal(m.text, '33%'); assert.match(m.tip, /anthropic: reading is old, refreshed before the next request/)
 })
+
+test('a 100% that may really be 1% is named as such, and the gauge shows the confirmed peak', () => {
+  const prov = { provider: 'anthropic', state: 'unverified', peak_percent: 27,
+    windows: [{ label: 'Current session', used_percent: 100, resets: 'in 3h', ambiguous: true },
+              { label: 'Current week', used_percent: 27, resets: 'in 3d' }] }
+  const m = chipModel(status('unverified', [prov]))
+  assert.equal(m.text, '27%')
+  assert.match(m.tip, /Current session 100% \(may really be 1%; resets in 3h\)/)
+  assert.doesNotMatch(m.tip, /fail_open/, 'an unconfirmed 100% is not a fail_open pass')
+  assert.match(m.tip, /anthropic: allowed, the 100% is unconfirmed/)
+})

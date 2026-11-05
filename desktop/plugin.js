@@ -45,9 +45,14 @@ function chipModel(status) {
   const lines = [`usage-guard refuses at ${Math.round(status.threshold_percent)}% used`];
   if (status.fail_open) lines.push("fail_open is ON");
   for (const p of status.providers) {
-    const windows = (p.windows || []).map((w) => `${w.label} ${Math.round(w.used_percent)}% (resets ${w.resets})`);
+    // Hermes reports a 1% Anthropic window as 100% (hermes-agent#139916): the guard
+    // does not treat such a lone 100% as full, and the tooltip says so.
+    const windows = (p.windows || []).map((w) => w.ambiguous
+      ? `${w.label} ${Math.round(w.used_percent)}% (may really be 1%; resets ${w.resets})`
+      : `${w.label} ${Math.round(w.used_percent)}% (resets ${w.resets})`);
     const detail = windows.length ? ` · ${windows.join(" · ")}` : p.state === "idle" ? "" : " · no reading";
-    lines.push(`${p.provider}: ${STATE_TEXT[p.state] || p.state}${detail}`);
+    const unconfirmed = p.state === "unverified" && (p.windows || []).some((w) => w.ambiguous);
+    lines.push(`${p.provider}: ${unconfirmed ? "allowed, the 100% is unconfirmed" : STATE_TEXT[p.state] || p.state}${detail}`);
   }
   return { state, text, tip: lines.join("\n") };
 }

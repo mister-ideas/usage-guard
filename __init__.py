@@ -16,9 +16,10 @@ not confirm.
 Every source is read through the documented
 ``agent.account_usage.fetch_account_usage``, so no credential reaches this plugin
 and no usage endpoint is called from here. Note that upstream's Anthropic parser
-scales any ``utilization`` <= 1 by 100 while that payload's values are
-percentages, so a sub-1% window arrives inflated and the guard cannot repair it
-from the public API. Refusal replies are marked
+(until NousResearch/hermes-agent#139916) scales any ``utilization`` <= 1 by 100
+while that payload's values are percentages, so a 1% window arrives as 100%. Such
+a lone 100% is treated as unconfirmed rather than full (see
+``_mark_unconfirmed_full``). Refusal replies are marked
 usage_guard_blocked so host auxiliary paths reject them before provider dispatch.
 On stock Hermes this gates main-loop llm_execution dispatches, including MoA
 turns (the running preset's enabled slots are resolved and checked). Auxiliary
@@ -608,6 +609,58 @@ def _failure_record(
     return record
 
 
+# ── a 100% Anthropic reading that may really be 1% ──────────────────────────
+
+_UNCONFIRMED_FULL_REASON = (
+    "Anthropic reports a window at 100%, which Hermes also reports for 1% until "
+    "hermes-agent#139916; with extra usage off, Anthropic stops requests itself at a real 100%"
+)
+
+
+def _same_window(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    if a.get("label") != b.get("label"):
+        return False
+    ra, rb = _parse_ts(a.get("reset_at")), _parse_ts(b.get("reset_at"))
+    return ra is not None and rb is not None and abs((ra - rb).total_seconds()) <= 600
+
+
+def _mark_unconfirmed_full(record: dict[str, Any], previous: Optional[dict[str, Any]], snapshot: Any) -> dict[str, Any]:
+    """Flag Anthropic windows read at exactly 100% that may really be 1%.
+
+    Anthropic reports whole percentages, so only 100.0 is ambiguous. Usage never goes
+    down inside one window, so an earlier reading of the same window (same label and
+    reset) above 1% proves a later 100% is real. No private Hermes code is inspected to
+    tell a fixed core apart: on one, the only cost is that a first reading of a full
+    window passes while extra usage is off, and Anthropic refuses that request itself.
+    Refusing on an unproven 100% locked a profile out: the refusal kept usage at 1%,
+    and every later read said 100% again until the window reset.
+    """
+    if (not record.get("windows") or getattr(snapshot, "provider", None) != "anthropic"
+            or getattr(snapshot, "source", None) != "oauth_usage_api"):
+        return record
+    details = getattr(snapshot, "details", None) or ()
+    record["extra_usage"] = any(isinstance(d, str) and d.startswith("Extra usage:") for d in details)
+    prior = [w for w in ((previous or {}).get("windows") or []) if isinstance(w, dict)]
+    for window in record["windows"]:
+        if window.get("used_percent") != 100.0:
+            continue
+        proven = any(
+            _same_window(window, p) and not p.get("unconfirmed_full")
+            and isinstance(p.get("used_percent"), (int, float)) and not isinstance(p.get("used_percent"), bool)
+            and 1.0 < float(p["used_percent"]) <= 100.0
+            for p in prior
+        )
+        if not proven:
+            window["unconfirmed_full"] = True
+    return record
+
+
+def _discounted(record: Optional[dict[str, Any]], window: Any) -> bool:
+    """An unconfirmed 100% counts only when extra usage could start spending."""
+    return (isinstance(window, dict) and window.get("unconfirmed_full") is True
+            and (record or {}).get("extra_usage") is not True)
+
+
 def _exhausted_windows(
     record: Optional[dict[str, Any]], threshold_percent: float, now: Optional[datetime] = None
 ) -> list[dict[str, Any]]:
@@ -622,6 +675,8 @@ def _exhausted_windows(
         if isinstance(used, bool) or not isinstance(used, (int, float)):
             continue
         if float(used) < threshold_percent:
+            continue
+        if _discounted(record, window):
             continue
         hits.append(window)
     return hits
@@ -667,7 +722,7 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
         previous = previous if isinstance(previous, dict) else {}
         try:
             snapshot = fetcher()
-            record = _snapshot_record(snapshot)
+            record = _mark_unconfirmed_full(_snapshot_record(snapshot), previous, snapshot)
             if not record.get("windows"):
                 # An empty read is not evidence about allowance: the host reports a
                 # rate limit and a missing credential the same way, so the guard
@@ -1322,6 +1377,8 @@ def _decide_provider(
 
     hits = _exhausted_windows(record, settings["threshold_percent"], now)
     if not hits:
+        if any(_discounted(record, w) for w in record.get("windows") or []):
+            return _Decision(True, reason=_UNCONFIRMED_FULL_REASON)
         return _Decision(True)
     windows_txt = "; ".join(
         f"{w.get('label')}: {float(w.get('used_percent') or 0):.0f}% used, "
@@ -1743,6 +1800,8 @@ def _peak_percent(provider: str, settings: dict[str, Any]) -> Optional[tuple[flo
     record = _scaled_record(record, settings["source_scales"].get(source_key, "percent"))
     best: Optional[tuple[float, dict[str, Any]]] = None
     for window in (record or {}).get("windows") or []:
+        if _discounted(record, window):
+            continue
         used = window.get("used_percent") if isinstance(window, dict) else None
         if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
             continue
@@ -1857,7 +1916,8 @@ def _status_windows(record: Any, settings: dict[str, Any], source_key: str) -> l
         if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
             continue
         windows.append({"label": str(window.get("label") or "window"), "used_percent": float(used),
-                        "reset_at": window.get("reset_at"), "resets": _fmt_reset(window)})
+                        "reset_at": window.get("reset_at"), "resets": _fmt_reset(window),
+                        "ambiguous": _discounted(record, window)})
     return windows
 
 
@@ -1865,7 +1925,7 @@ def _provider_status(provider: str, settings: dict[str, Any], config_ok: bool, n
     source_key = settings["provider_sources"].get(provider, provider)
     record = _read_cache().get("providers", {}).get(source_key)
     windows = _status_windows(record, settings, source_key)
-    peak = max((w["used_percent"] for w in windows), default=None)
+    peak = max((w["used_percent"] for w in windows if not w["ambiguous"]), default=None)
     if not config_ok:
         decision = _Decision(False, _NOTICE_CONFIG, "invalid settings")
     elif record is None:
@@ -1925,6 +1985,8 @@ def format_status(status: dict[str, Any]) -> str:
         over = p["state"] == "blocked"
         for w in p["windows"]:
             mark = " ← at or over the limit" if over and w["used_percent"] >= status["threshold_percent"] else ""
+            if w.get("ambiguous"):
+                mark = " ← may really be 1% (Hermes reports 1% as 100%), so not treated as full"
             lines.append(f"- {w['label']}: {w['used_percent']:.0f}% used, resets {w['resets']}{mark}")
         if not p["windows"] and p["state"] != "idle":
             lines.append("- no usage reading")
