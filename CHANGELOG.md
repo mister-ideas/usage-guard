@@ -2,6 +2,12 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.6.0 — unreleased
+
+One reliability fix: the guard no longer locks an agent out when the usage endpoint stops answering.
+
+- **Fix: a window whose reset passed no longer refuses on the clock alone.** When the endpoint goes quiet, `reset_at` moves into the past while the last good snapshot still showed room left — and the guard refused anyway, with "unconfirmed reset", for as long as the endpoint stayed down. An agent nowhere near its limit could not send a single request. A past reset is now only treated as replenishment once a new reading shows a future reset, and only while the reading was at/over the threshold: under the limit the request passes. At or over it, the window stays guarded exactly as before.
+
 ## 0.5.0 — unreleased
 
 See what the guard would decide, and a reliability fix for multiplexed gateways.

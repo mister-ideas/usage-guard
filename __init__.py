@@ -11,7 +11,9 @@ single read, so the guard's own request rate cannot rate-limit the endpoint it
 reads. A read that fails or is rate-limited keeps the last good snapshot and
 decides on it; evidence that is stale, missing or malformed denies
 (fail-closed), so a long run never acts on usage information the guard could
-not confirm.
+not confirm. A past ``reset_at`` alone is not such evidence: the last confirmed
+reading decides, and only a window at/over the threshold stays guarded until a
+fresh snapshot reports a future reset.
 
 Every source is read through the documented
 ``agent.account_usage.fetch_account_usage``, so no credential reaches this plugin
@@ -1368,10 +1370,21 @@ def _decide_provider(
     if source_key == "openai-codex" and record.get("codex_rate_blocked") is True:
         return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("Codex server limit")), "Codex server limit")
 
-    # A past reset is not proof of replenishment. Refuse until a new snapshot
-    # reports a future reset rather than guessing an exhausted window cleared.
+    # A past reset is not proof that a low reading cleared, and a low reading is
+    # not proof of a real reset either. What is knowable is the percentage: at or
+    # over the limit the window stays guarded until a fresh snapshot reports a
+    # future reset; under it, the request passes. Refusing on the clock alone
+    # locked out every agent whose endpoint stopped answering — the guard could
+    # not distinguish "the window replenished" from "nobody told us anything".
     for window in record.get("windows") or []:
-        reset = _parse_ts(window.get("reset_at")) if isinstance(window, dict) else None
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_percent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)):
+            continue
+        if float(used) < settings["threshold_percent"]:
+            continue
+        reset = _parse_ts(window.get("reset_at"))
         if reset is not None and reset <= now:
             return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("unconfirmed reset")), "unconfirmed reset")
 
