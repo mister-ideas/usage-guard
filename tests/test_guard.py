@@ -103,6 +103,18 @@ def test_unavailable_reason_denies_when_fail_closed(guard):
     assert out.usage_guard_blocked is True
 
 
+def test_a_refusal_logs_the_reading_it_used(guard, caplog):
+    # A refusal that later looks wrong must be diagnosable from the log alone:
+    # which reading (its age, its windows) and whether the last read failed.
+    rec = make_record(100)
+    with caplog.at_level("WARNING", logger="plugins.usage-guard"):
+        out, calls = invoke(guard, rec)
+    assert calls == [] and out.usage_guard_blocked is True
+    line = next(r.getMessage() for r in caplog.records if "refused provider" in r.getMessage())
+    assert "reading_age_s=" in line and "read_error=" in line and "windows=" in line
+    assert "100" in line.split("windows=", 1)[1]
+
+
 def test_fail_open_allows_unavailable(guard):
     rec = make_record(10, ok=False, windows=[], unavailable_reason="fetch-error")
     _, calls = invoke(guard, rec, fail_open=True)

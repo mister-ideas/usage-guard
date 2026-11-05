@@ -1163,6 +1163,22 @@ def _borrow_snapshot(
     return None
 
 
+def _reading_evidence(source_key: str) -> str:
+    """The cached reading a refusal was based on, for the log: age, read error, windows."""
+    try:
+        record = _read_cache().get("providers", {}).get(source_key)
+        if not isinstance(record, dict):
+            return " [no cached reading]"
+        age = _evidence_age_s(record, _now_utc())
+        windows = ", ".join(
+            f"{w.get('label')}={w.get('used_percent')}%@{w.get('reset_at')}"
+            for w in record.get("windows") or [] if isinstance(w, dict))
+        return (f" [reading_age_s={None if age is None else round(age)} "
+                f"read_error={record.get('unavailable_reason') or None} windows={windows or None}]")
+    except Exception:  # evidence is best-effort; never let logging change a decision
+        return " [reading unavailable]"
+
+
 def _decide_provider(
     provider: str, source_key: str, settings: dict[str, Any], config_ok: bool,
     now: Optional[datetime] = None, spawn_poll: bool = True,
@@ -1678,8 +1694,8 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
         decision = _decide_provider(provider, source_key, settings, config_ok)
         if decision.allow:
             return downstream(request)
-        LOG.warning("usage-guard refused provider=%s model=%s: %s",
-                    provider, kwargs.get("model"), decision.reason)
+        LOG.warning("usage-guard refused provider=%s model=%s: %s%s",
+                    provider, kwargs.get("model"), decision.reason, _reading_evidence(source_key))
         return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
     except Exception:
         if dispatched:
