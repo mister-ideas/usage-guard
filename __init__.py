@@ -139,7 +139,7 @@ DEFAULTS: dict[str, Any] = {
 # Chat-facing refusals. Desktop and gateways render these as markdown.
 _NOTICE_REFUSED = (
     "⏸ **usage-guard did not send this request** to `{provider}`.\n\n"
-    "**Why:** {why}. Your limit is set to refuse at {threshold:.0f}% used.\n\n"
+    "**Why:** {why} — at or over your limit of {threshold:.0f}% used.\n\n"
     "**What to do**\n"
     "- Switch to a provider that is not guarded with `/model`.\n"
     "- Or wait for the reset: the next fresh reading lifts this refusal.\n"

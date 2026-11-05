@@ -146,6 +146,14 @@ def test_slash_command_spells_out_a_failed_reading(guard):
     assert "reason: the usage endpoint did not answer" in text
 
 
+def test_the_refusal_names_the_threshold_actually_used(guard):
+    """A custom limit of 27% must not read "set to refuse at 100%"."""
+    st = status(guard, {"anthropic": record(27, 10)}, threshold_percent=27)
+    notice = entry(st, "anthropic")["notice"]
+    assert "at or over your limit of 27% used" in notice
+    assert "set to refuse at" not in notice
+
+
 def test_refusal_grammar_singular_and_plural(guard):
     one = status(guard, {"anthropic": record(100, 40)})
     both = status(guard, {"anthropic": record(100, 100)})
