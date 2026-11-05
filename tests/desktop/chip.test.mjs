@@ -55,7 +55,7 @@ test('providers that read the same account are listed once, naming each provider
   const m = chipModel(status('blocked', [sub, api, { ...p('openai-codex', 'idle'), source: 'openai-codex' }]))
   const lines = m.tip.split('\n')
   assert.equal(lines.filter(l => /Session 20%/.test(l)).length, 1, 'one entry per account')
-  assert.match(m.tip, /anthropic \(claude-subscription-directsdk-experimental, anthropic\): blocked · Session 20%/)
+  assert.match(m.tip, /anthropic and claude-subscription-directsdk-experimental: blocked · Session 20%/)
   assert.match(m.tip, /openai-codex: not used yet/)
 })
 

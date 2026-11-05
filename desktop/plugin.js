@@ -52,7 +52,10 @@ function chipModel(status) {
     if (g) g.names.push(p.provider); else groups.push({ source, names: [p.provider], p });
   }
   for (const { source, names, p: first } of groups) {
-    const p = { ...first, provider: names.length > 1 ? `${source} (${names.join(", ")})` : names[0] };
+    const others = names.filter((n) => n !== source);
+    const label = names.length === 1 ? names[0]
+      : others.length < names.length ? `${source} and ${others.join(", ")}` : `${source} (${names.join(", ")})`;
+    const p = { ...first, provider: label };
     // Hermes reports a 1% Anthropic window as 100% (hermes-agent#139916): the guard
     // does not treat such a lone 100% as full, and the tooltip says so.
     const windows = (p.windows || []).map((w) => w.ambiguous
