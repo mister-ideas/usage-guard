@@ -2,7 +2,7 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
-## 0.5.0 — unreleased
+## 0.5.0 — 2026-11-06
 
 See what the guard would decide, and reliability fixes so the guard never locks out an agent that is under its limit.
 
