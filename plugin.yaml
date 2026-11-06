@@ -66,3 +66,7 @@ config_schema:
     type: int
     default: 0
     description: "Cap on each request's output budget near the wall, to limit how far an in-flight request can spill; 0 disables (default, since a cap can truncate answers)"
+  hydrate_from_paths:
+    type: list
+    default: []
+    description: "Files to borrow a recent usage snapshot from (another reader's cache, same format as usage.json), consulted only when the guard's own reading is not fresh, instead of spending a usage request; [] disables"

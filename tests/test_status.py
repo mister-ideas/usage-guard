@@ -163,3 +163,12 @@ def test_refusal_grammar_singular_and_plural(guard):
     assert "Weekly" not in one_notice  # the 40% window is not named
     assert "Your Session and Weekly windows are at 100% and 100% used" in both_notice
     assert "is used up" not in both_notice and "window Session:" not in both_notice
+
+
+def test_every_setting_the_guard_reads_is_declared_in_the_manifest(guard):
+    """A setting missing from config_schema is invisible to settings UIs and validators."""
+    import pathlib
+    import yaml
+
+    manifest = yaml.safe_load((pathlib.Path(guard.__file__).parent / "plugin.yaml").read_text())
+    assert set(guard.DEFAULTS) <= set(manifest["config_schema"]), set(guard.DEFAULTS) - set(manifest["config_schema"])
