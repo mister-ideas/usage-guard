@@ -32,7 +32,7 @@ Do not claim this plugin guarantees subscription safety or prevents extra billin
 
 1. Install dev dependencies: `python -m pip install -r requirements-dev.txt`
 2. Run the tests: `python -m pytest tests -v` (host-contract tests skip unless `HERMES_CORE` points at a Hermes checkout).
-3. Desktop chip tests: `node tests/desktop/stub-sdk.mjs && node --test tests/desktop/`
+3. Desktop chip tests: `node tests/desktop/stub-sdk.mjs && node --test tests/desktop/chip.test.mjs`
 4. Lint: `ruff check .`
 5. Package check: `python scripts/package.py`
 6. Manifest checks: `hermes plugins doctor . --ci` and `hermes plugins validate .`

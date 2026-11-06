@@ -132,7 +132,7 @@ Subscription plans now bill extra usage once a window is exhausted, and on many 
 ```sh
 python -m pip install -r requirements-dev.txt
 python -m pytest tests -v          # offline suite (host-contract tests skip)
-node tests/desktop/stub-sdk.mjs && node --test tests/desktop/   # Desktop chip
+node tests/desktop/stub-sdk.mjs && node --test tests/desktop/chip.test.mjs   # Desktop chip
 ruff check .
 hermes plugins validate . --install-deps
 python scripts/package.py          # dist/usage-guard-<version>.zip

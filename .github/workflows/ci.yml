@@ -81,7 +81,7 @@ jobs:
       - name: Chip model tests against the real plugin.js
         run: |
           node tests/desktop/stub-sdk.mjs
-          node --test tests/desktop/
+          node --test tests/desktop/chip.test.mjs
       - name: Import allowlist
         run: |
           bad=$(grep -oE "from ['\"][^'\"]+['\"]" desktop/plugin.js | grep -vE "['\"](@hermes/plugin-sdk|react|react/jsx-runtime)['\"]" || true)

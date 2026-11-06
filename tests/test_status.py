@@ -170,5 +170,5 @@ def test_every_setting_the_guard_reads_is_declared_in_the_manifest(guard):
     import pathlib
     import yaml
 
-    manifest = yaml.safe_load((pathlib.Path(guard.__file__).parent / "plugin.yaml").read_text())
+    manifest = yaml.safe_load((pathlib.Path(guard.__file__).parent / "plugin.yaml").read_text(encoding="utf-8"))
     assert set(guard.DEFAULTS) <= set(manifest["config_schema"]), set(guard.DEFAULTS) - set(manifest["config_schema"])
