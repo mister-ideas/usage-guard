@@ -103,6 +103,18 @@ def test_unavailable_reason_denies_when_fail_closed(guard):
     assert out.usage_guard_blocked is True
 
 
+def test_a_refusal_logs_the_reading_it_used(guard, caplog):
+    # A refusal that later looks wrong must be diagnosable from the log alone:
+    # which reading (its age, its windows) and whether the last read failed.
+    rec = make_record(100)
+    with caplog.at_level("WARNING", logger="plugins.usage-guard"):
+        out, calls = invoke(guard, rec)
+    assert calls == [] and out.usage_guard_blocked is True
+    line = next(r.getMessage() for r in caplog.records if "refused provider" in r.getMessage())
+    assert "reading_age_s=" in line and "read_error=" in line and "windows=" in line
+    assert "100" in line.split("windows=", 1)[1]
+
+
 def test_fail_open_allows_unavailable(guard):
     rec = make_record(10, ok=False, windows=[], unavailable_reason="fetch-error")
     _, calls = invoke(guard, rec, fail_open=True)
@@ -673,11 +685,15 @@ def test_manifest_declares_exactly_what_register_adds(guard):
     import yaml
     manifest = yaml.safe_load(_root().joinpath("plugin.yaml").read_text(encoding="utf-8"))
     assert manifest["name"] == "usage-guard"
-    seen = {"mw": [], "hooks": [], "tools": []}
+    seen = {"mw": [], "hooks": [], "tools": [], "commands": []}
 
     class Ctx:
         def get_config(self, key, default=None):
             return default
+
+        def register_command(self, name, handler, description="", **k):
+            seen["commands"].append(name)
+            assert handler() and description
 
         def register_middleware(self, kind, fn):
             seen["mw"].append(kind)
@@ -692,6 +708,7 @@ def test_manifest_declares_exactly_what_register_adds(guard):
     assert sorted(manifest["provides_middleware"]) == sorted(seen["mw"])
     assert sorted(manifest["provides_hooks"]) == sorted(seen["hooks"])
     assert manifest["provides_tools"] == [] and seen["tools"] == []
+    assert seen["commands"] == ["usage-guard"]
     assert manifest.get("requires_env") in (None, [])
 
 
@@ -1148,7 +1165,7 @@ def test_the_plugin_depends_only_on_hermes_public_surfaces(guard):
             modules.add(node.module.split(".")[0])
     hermes = {"agent", "hermes_cli", "plugins"}
     stdlib = {
-        "__future__", "contextlib", "datetime", "fcntl", "json", "logging", "math",
+        "__future__", "contextlib", "contextvars", "datetime", "fcntl", "json", "logging", "math",
         "msvcrt", "os", "threading", "time", "types", "typing", "uuid",
     }
     assert modules <= hermes | stdlib, sorted(modules - (hermes | stdlib))

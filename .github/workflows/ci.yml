@@ -27,7 +27,7 @@ jobs:
         run: python -m pip install pytest pyyaml
 
       - name: Byte-compile backend sources
-        run: python -m py_compile __init__.py scripts/package.py
+        run: python -m py_compile __init__.py dashboard/plugin_api.py scripts/package.py
 
       - name: Collect tests (zero collection fails the job)
         run: |
@@ -42,7 +42,9 @@ jobs:
         shell: bash
 
       - name: Run offline unit tests
-        run: python -m pytest tests/test_guard.py tests/test_robustness.py -v
+        # Every offline file, so a new test file cannot be silently left out;
+        # host-contract tests skip here and are mandatory in their own job.
+        run: python -m pytest tests -v
 
       - name: Lint (ruff)
         run: |
@@ -58,12 +60,32 @@ jobs:
           zips = list(Path("dist").glob("usage-guard-*.zip"))
           assert len(zips) == 1, zips
           names = ZipFile(zips[0]).namelist()
-          for required in ("usage-guard/plugin.yaml", "usage-guard/__init__.py", "usage-guard/README.md"):
+          for required in ("usage-guard/plugin.yaml", "usage-guard/__init__.py", "usage-guard/README.md",
+                           "usage-guard/desktop/plugin.js", "usage-guard/dashboard/manifest.json",
+                           "usage-guard/dashboard/plugin_api.py"):
               assert required in names, (required, names)
           assert not any("/tests/" in n for n in names), names
           print("package OK:", zips[0].name)
           PY
         shell: bash
+
+  desktop-chip:
+    name: Desktop chip (Node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22"
+      - name: Chip model tests against the real plugin.js
+        run: |
+          node tests/desktop/stub-sdk.mjs
+          node --test tests/desktop/chip.test.mjs
+      - name: Import allowlist
+        run: |
+          bad=$(grep -oE "from ['\"][^'\"]+['\"]" desktop/plugin.js | grep -vE "['\"](@hermes/plugin-sdk|react|react/jsx-runtime)['\"]" || true)
+          if [ -n "$bad" ]; then echo "::error::imports outside the Desktop loader allowlist: $bad"; exit 1; fi
 
   host-contract:
     name: Host contract (pinned Hermes)

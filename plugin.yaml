@@ -1,5 +1,5 @@
 name: usage-guard
-version: 0.4.5
+version: 0.5.0
 description: "Keeps a Hermes agent inside its subscription allowance: refuses a provider call once a usage window is exhausted, so paid extra usage is never spent."
 author: mister-ideas
 license: MIT
@@ -66,3 +66,7 @@ config_schema:
     type: int
     default: 0
     description: "Cap on each request's output budget near the wall, to limit how far an in-flight request can spill; 0 disables (default, since a cap can truncate answers)"
+  hydrate_from_paths:
+    type: list
+    default: []
+    description: "Files to borrow a recent usage snapshot from (another reader's cache, same format as usage.json), consulted only when the guard's own reading is not fresh, instead of spending a usage request; [] disables"

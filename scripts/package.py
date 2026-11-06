@@ -15,7 +15,10 @@ out = root / "dist"
 out.mkdir(exist_ok=True)
 archive = out / f"usage-guard-{version}.zip"
 
-files = [root / name for name in ("plugin.yaml", "__init__.py", "README.md", "LICENSE", "CONTRIBUTING.md", "CHANGELOG.md", "SECURITY.md")]
+files = [root / name for name in (
+    "plugin.yaml", "__init__.py", "README.md", "LICENSE", "CONTRIBUTING.md", "CHANGELOG.md", "SECURITY.md",
+    "desktop/plugin.js", "dashboard/manifest.json", "dashboard/plugin_api.py",
+)]
 
 with ZipFile(archive, "w", ZIP_DEFLATED) as output:
     for path in sorted(files):

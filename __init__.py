@@ -11,14 +11,17 @@ single read, so the guard's own request rate cannot rate-limit the endpoint it
 reads. A read that fails or is rate-limited keeps the last good snapshot and
 decides on it; evidence that is stale, missing or malformed denies
 (fail-closed), so a long run never acts on usage information the guard could
-not confirm.
+not confirm. A past ``reset_at`` alone is not such evidence: the last confirmed
+reading decides, and only a window at/over the threshold stays guarded until a
+fresh snapshot reports a future reset.
 
 Every source is read through the documented
 ``agent.account_usage.fetch_account_usage``, so no credential reaches this plugin
 and no usage endpoint is called from here. Note that upstream's Anthropic parser
-scales any ``utilization`` <= 1 by 100 while that payload's values are
-percentages, so a sub-1% window arrives inflated and the guard cannot repair it
-from the public API. Refusal replies are marked
+(until NousResearch/hermes-agent#139916) scales any ``utilization`` <= 1 by 100
+while that payload's values are percentages, so a 1% window arrives as 100%. Such
+a lone 100% is treated as unconfirmed rather than full (see
+``_mark_unconfirmed_full``). Refusal replies are marked
 usage_guard_blocked so host auxiliary paths reject them before provider dispatch.
 On stock Hermes this gates main-loop llm_execution dispatches, including MoA
 turns (the running preset's enabled slots are resolved and checked). Auxiliary
@@ -30,6 +33,7 @@ missing plugins, and credential mismatches remain outside this guard.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import math
@@ -137,7 +141,7 @@ DEFAULTS: dict[str, Any] = {
 # Chat-facing refusals. Desktop and gateways render these as markdown.
 _NOTICE_REFUSED = (
     "⏸ **usage-guard did not send this request** to `{provider}`.\n\n"
-    "**Why:** {why}. Your limit is set to refuse at {threshold:.0f}% used.\n\n"
+    "**Why:** {why} — at or over your limit of {threshold:.0f}% used.\n\n"
     "**What to do**\n"
     "- Switch to a provider that is not guarded with `/model`.\n"
     "- Or wait for the reset: the next fresh reading lifts this refusal.\n"
@@ -607,6 +611,58 @@ def _failure_record(
     return record
 
 
+# ── a 100% Anthropic reading that may really be 1% ──────────────────────────
+
+_UNCONFIRMED_FULL_REASON = (
+    "Anthropic reports a window at 100%, which Hermes also reports for 1% until "
+    "hermes-agent#139916; with extra usage off, Anthropic stops requests itself at a real 100%"
+)
+
+
+def _same_window(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    if a.get("label") != b.get("label"):
+        return False
+    ra, rb = _parse_ts(a.get("reset_at")), _parse_ts(b.get("reset_at"))
+    return ra is not None and rb is not None and abs((ra - rb).total_seconds()) <= 600
+
+
+def _mark_unconfirmed_full(record: dict[str, Any], previous: Optional[dict[str, Any]], snapshot: Any) -> dict[str, Any]:
+    """Flag Anthropic windows read at exactly 100% that may really be 1%.
+
+    Anthropic reports whole percentages, so only 100.0 is ambiguous. Usage never goes
+    down inside one window, so an earlier reading of the same window (same label and
+    reset) above 1% proves a later 100% is real. No private Hermes code is inspected to
+    tell a fixed core apart: on one, the only cost is that a first reading of a full
+    window passes while extra usage is off, and Anthropic refuses that request itself.
+    Refusing on an unproven 100% locked a profile out: the refusal kept usage at 1%,
+    and every later read said 100% again until the window reset.
+    """
+    if (not record.get("windows") or getattr(snapshot, "provider", None) != "anthropic"
+            or getattr(snapshot, "source", None) != "oauth_usage_api"):
+        return record
+    details = getattr(snapshot, "details", None) or ()
+    record["extra_usage"] = any(isinstance(d, str) and d.startswith("Extra usage:") for d in details)
+    prior = [w for w in ((previous or {}).get("windows") or []) if isinstance(w, dict)]
+    for window in record["windows"]:
+        if window.get("used_percent") != 100.0:
+            continue
+        proven = any(
+            _same_window(window, p) and not p.get("unconfirmed_full")
+            and isinstance(p.get("used_percent"), (int, float)) and not isinstance(p.get("used_percent"), bool)
+            and 1.0 < float(p["used_percent"]) <= 100.0
+            for p in prior
+        )
+        if not proven:
+            window["unconfirmed_full"] = True
+    return record
+
+
+def _discounted(record: Optional[dict[str, Any]], window: Any) -> bool:
+    """An unconfirmed 100% counts only when extra usage could start spending."""
+    return (isinstance(window, dict) and window.get("unconfirmed_full") is True
+            and (record or {}).get("extra_usage") is not True)
+
+
 def _exhausted_windows(
     record: Optional[dict[str, Any]], threshold_percent: float, now: Optional[datetime] = None
 ) -> list[dict[str, Any]]:
@@ -621,6 +677,8 @@ def _exhausted_windows(
         if isinstance(used, bool) or not isinstance(used, (int, float)):
             continue
         if float(used) < threshold_percent:
+            continue
+        if _discounted(record, window):
             continue
         hits.append(window)
     return hits
@@ -666,7 +724,7 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
         previous = previous if isinstance(previous, dict) else {}
         try:
             snapshot = fetcher()
-            record = _snapshot_record(snapshot)
+            record = _mark_unconfirmed_full(_snapshot_record(snapshot), previous, snapshot)
             if not record.get("windows"):
                 # An empty read is not evidence about allowance: the host reports a
                 # rate limit and a missing credential the same way, so the guard
@@ -697,8 +755,13 @@ def _spawn_poll(source_key: str, fetcher: Callable[[], Any], sync_timeout_s: flo
                 _poll_inflight.discard(source_key)
 
     try:
+        # Run inside a copy of the caller's context: Hermes scopes per-turn
+        # secrets in ContextVars, and a bare thread starts with an empty context,
+        # so under a multiplexed gateway the fetcher's get_secret() would raise
+        # UnscopedSecretError and every read would fail.
+        context = contextvars.copy_context()
         thread = threading.Thread(
-            target=_run, name=f"usage-guard-poll-{source_key}", daemon=True
+            target=context.run, args=(_run,), name=f"usage-guard-poll-{source_key}", daemon=True
         )
         thread.start()
         if sync_timeout_s > 0.0:
@@ -1157,6 +1220,22 @@ def _borrow_snapshot(
     return None
 
 
+def _reading_evidence(source_key: str) -> str:
+    """The cached reading a refusal was based on, for the log: age, read error, windows."""
+    try:
+        record = _read_cache().get("providers", {}).get(source_key)
+        if not isinstance(record, dict):
+            return " [no cached reading]"
+        age = _evidence_age_s(record, _now_utc())
+        windows = ", ".join(
+            f"{w.get('label')}={w.get('used_percent')}%@{w.get('reset_at')}"
+            for w in record.get("windows") or [] if isinstance(w, dict))
+        return (f" [reading_age_s={None if age is None else round(age)} "
+                f"read_error={record.get('unavailable_reason') or None} windows={windows or None}]")
+    except Exception:  # evidence is best-effort; never let logging change a decision
+        return " [reading unavailable]"
+
+
 def _decide_provider(
     provider: str, source_key: str, settings: dict[str, Any], config_ok: bool,
     now: Optional[datetime] = None, spawn_poll: bool = True,
@@ -1291,15 +1370,28 @@ def _decide_provider(
     if source_key == "openai-codex" and record.get("codex_rate_blocked") is True:
         return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("Codex server limit")), "Codex server limit")
 
-    # A past reset is not proof of replenishment. Refuse until a new snapshot
-    # reports a future reset rather than guessing an exhausted window cleared.
+    # A past reset is not proof that a low reading cleared, and a low reading is
+    # not proof of a real reset either. What is knowable is the percentage: at or
+    # over the limit the window stays guarded until a fresh snapshot reports a
+    # future reset; under it, the request passes. Refusing on the clock alone
+    # locked out every agent whose endpoint stopped answering — the guard could
+    # not distinguish "the window replenished" from "nobody told us anything".
     for window in record.get("windows") or []:
-        reset = _parse_ts(window.get("reset_at")) if isinstance(window, dict) else None
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_percent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)):
+            continue
+        if float(used) < settings["threshold_percent"]:
+            continue
+        reset = _parse_ts(window.get("reset_at"))
         if reset is not None and reset <= now:
             return _Decision(False, _NOTICE_UNAVAILABLE.format(provider=provider, reason=_describe_reason("unconfirmed reset")), "unconfirmed reset")
 
     hits = _exhausted_windows(record, settings["threshold_percent"], now)
     if not hits:
+        if any(_discounted(record, w) for w in record.get("windows") or []):
+            return _Decision(True, reason=_UNCONFIRMED_FULL_REASON)
         return _Decision(True)
     windows_txt = "; ".join(
         f"{w.get('label')}: {float(w.get('used_percent') or 0):.0f}% used, "
@@ -1312,11 +1404,23 @@ def _decide_provider(
         False,
         _NOTICE_REFUSED.format(
             provider=who,
-            why=f"the subscription window{'s' if len(hits) > 1 else ''} {windows_txt} is used up",
+            why=_why_refused(hits),
             threshold=settings["threshold_percent"],
         ),
         reason=windows_txt,
     )
+
+
+def _why_refused(hits: list[dict[str, Any]]) -> str:
+    """One sentence naming the windows at or over the limit, with their reset."""
+    labels = [str(w.get("label") or "usage") for w in hits]
+    pcts = [f"{float(w.get('used_percent') or 0):.0f}%" for w in hits]
+    resets = sorted({_fmt_reset(w) for w in hits})
+    if len(hits) == 1:
+        return f"Your {labels[0]} window is at {pcts[0]} used (resets {resets[0]})"
+    names = ", ".join(labels[:-1]) + " and " + labels[-1]
+    amounts = ", ".join(pcts[:-1]) + " and " + pcts[-1]
+    return f"Your {names} windows are at {amounts} used (resets {', '.join(resets)})"
 
 
 def _claim_fetch_slot(source_key: str, min_interval_s: float) -> bool:
@@ -1660,8 +1764,8 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
         decision = _decide_provider(provider, source_key, settings, config_ok)
         if decision.allow:
             return downstream(request)
-        LOG.warning("usage-guard refused provider=%s model=%s: %s",
-                    provider, kwargs.get("model"), decision.reason)
+        LOG.warning("usage-guard refused provider=%s model=%s: %s%s",
+                    provider, kwargs.get("model"), decision.reason, _reading_evidence(source_key))
         return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
     except Exception:
         if dispatched:
@@ -1709,6 +1813,8 @@ def _peak_percent(provider: str, settings: dict[str, Any]) -> Optional[tuple[flo
     record = _scaled_record(record, settings["source_scales"].get(source_key, "percent"))
     best: Optional[tuple[float, dict[str, Any]]] = None
     for window in (record or {}).get("windows") or []:
+        if _discounted(record, window):
+            continue
         used = window.get("used_percent") if isinstance(window, dict) else None
         if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
             continue
@@ -1807,6 +1913,122 @@ def near_wall_notice(config_reader: Callable[[str, Any], Any], **kwargs: Any) ->
         return None
 
 
+# ── status view (/usage-guard, Desktop chip) ────────────────────────────────
+
+# Worst first: the overall state is the most severe provider state.
+# "idle" (never asked about) ranks last and only shows when every provider is idle.
+_STATE_RANK = {"blocked": 0, "unverified": 1, "near": 2, "stale": 3, "passthrough": 4, "ok": 5, "idle": 6}
+
+
+def _status_windows(record: Any, settings: dict[str, Any], source_key: str) -> list[dict[str, Any]]:
+    record = _scaled_record(record if isinstance(record, dict) else None,
+                            settings["source_scales"].get(source_key, "percent"))
+    windows: list[dict[str, Any]] = []
+    for window in (record or {}).get("windows") or []:
+        used = window.get("used_percent") if isinstance(window, dict) else None
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+            continue
+        windows.append({"label": str(window.get("label") or "window"), "used_percent": float(used),
+                        "reset_at": window.get("reset_at"), "resets": _fmt_reset(window),
+                        "ambiguous": _discounted(record, window)})
+    return windows
+
+
+def _provider_status(provider: str, settings: dict[str, Any], config_ok: bool, now: datetime) -> dict[str, Any]:
+    source_key = settings["provider_sources"].get(provider, provider)
+    record = _read_cache().get("providers", {}).get(source_key)
+    windows = _status_windows(record, settings, source_key)
+    peak = max((w["used_percent"] for w in windows if not w["ambiguous"]), default=None)
+    if not config_ok:
+        decision = _Decision(False, _NOTICE_CONFIG, "invalid settings")
+    elif record is None:
+        # No record at all: no request has gone to this provider yet. The first
+        # one triggers a read and is decided on it, so "blocked" would be wrong.
+        return {"provider": provider, "source": source_key, "state": "idle", "reason": "",
+                "notice": "", "peak_percent": None, "windows": [], "evidence_age_s": None}
+    else:
+        # spawn_poll=False: the view only reports, it never spends a read.
+        decision = _decide_provider(provider, source_key, settings, config_ok, now=now, spawn_poll=False)
+    over = peak is not None and peak >= settings["threshold_percent"]
+    if not decision.allow and decision.reason == "no fresh snapshot" and windows and not over:
+        # The last reading is old but under the limit. The guard reads again
+        # before the next request is sent; the view itself never spends a read,
+        # so it reports "stale", not a refusal that would not happen.
+        state = "stale"
+    elif not decision.allow:
+        state = "blocked"
+    elif decision.reason.startswith("no account usage surface"):
+        state = "passthrough"
+    elif decision.reason:
+        state = "unverified"
+    elif peak is not None and peak >= settings["near_wall_percent"]:
+        state = "near"
+    else:
+        state = "ok"
+    age = _evidence_age_s(record if isinstance(record, dict) else None, now)
+    return {"provider": provider, "source": source_key, "state": state, "reason": decision.reason,
+            "notice": decision.notice, "peak_percent": peak, "windows": windows,
+            "evidence_age_s": None if age is None else round(age, 1)}
+
+
+def guard_status(config_reader: Callable[[str, Any], Any]) -> dict[str, Any]:
+    """What the guard would decide for each guarded provider, from the cache only."""
+    settings, config_ok = _read_settings(config_reader)
+    now = _now_utc()
+    providers = [_provider_status(p, settings, config_ok, now) for p in settings["provider_keys"]]
+    overall = min((p["state"] for p in providers), key=_STATE_RANK.__getitem__, default="ok")
+    return {"state": overall, "config_ok": config_ok, "threshold_percent": settings["threshold_percent"],
+            "near_wall_percent": settings["near_wall_percent"], "fail_open": settings["fail_open"],
+            "providers": providers, "checked_at": now.isoformat()}
+
+
+_STATE_TEXT = {
+    "ok": "ok", "near": "near the limit", "blocked": "BLOCKED",
+    "unverified": "allowed without a reading (fail_open)", "passthrough": "not guarded (no usage surface)",
+    "idle": "not used yet (its first request is checked before it is sent)",
+    "stale": "reading is old; refreshed before the next request",
+}
+
+
+def format_status(status: dict[str, Any]) -> str:
+    lines = [f"usage-guard: refuses at {status['threshold_percent']:.0f}% used"
+             + (", fail_open is ON" if status.get("fail_open") else "")]
+    for p in status["providers"]:
+        lines.append(f"\n{p['provider']}: {_STATE_TEXT.get(p['state'], p['state'])}")
+        over = p["state"] == "blocked"
+        for w in p["windows"]:
+            mark = " ← at or over the limit" if over and w["used_percent"] >= status["threshold_percent"] else ""
+            if w.get("ambiguous"):
+                mark = " ← may really be 1% (Hermes reports 1% as 100%), so not treated as full"
+            lines.append(f"- {w['label']}: {w['used_percent']:.0f}% used, resets {w['resets']}{mark}")
+        if not p["windows"] and p["state"] != "idle":
+            lines.append("- no usage reading")
+        # A refusal on the windows is already shown by the marks above; any other
+        # reason (no reading, invalid settings, fail_open) is spelled out.
+        if p["state"] in ("blocked", "unverified") and p["reason"] and not any(
+                over and w["used_percent"] >= status["threshold_percent"] for w in p["windows"]):
+            lines.append(f"- reason: {_describe_reason(p['reason'])}")
+    return "\n".join(lines)
+
+
+def hermes_config_reader() -> Callable[[str, Any], Any]:
+    """A settings reader for callers without a plugin ctx (the dashboard route).
+
+    Reads ``plugins.entries.usage-guard.settings`` (legacy ``config``) the way
+    ``ctx.get_config`` does. An unreadable config yields defaults, and the
+    view then reports what those defaults would decide.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+    except Exception:
+        config = {}
+    entry = ((config.get("plugins") or {}).get("entries") or {}).get("usage-guard") or {}
+    values = entry.get("settings") if isinstance(entry.get("settings"), dict) else entry.get("config")
+    values = values if isinstance(values, dict) else {}
+    return lambda key, default=None: values.get(key, default)
+
+
 def register(ctx) -> None:
     def middleware(**kwargs: Any) -> Any:
         return gate_llm_execution(ctx.get_config, **kwargs)
@@ -1820,3 +2042,16 @@ def register(ctx) -> None:
     ctx.register_middleware("llm_execution", middleware)
     ctx.register_middleware("llm_request", request_shaper)
     ctx.register_hook("pre_llm_call", pre_llm_call)
+
+    def status_command(raw_args: str = "") -> str:
+        # Cache-only: answering never spends a read of the usage endpoint.
+        return format_status(guard_status(ctx.get_config))
+
+    # Feature-detected so a host without slash-command support still loads the
+    # guard itself; the guard never depends on the view.
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command(
+            "usage-guard", status_command,
+            description="Show what usage-guard would decide right now, per guarded provider",
+        )

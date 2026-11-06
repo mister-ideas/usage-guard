@@ -15,14 +15,14 @@ A bug report needs the refusal notice the guard printed, your Hermes and plugin 
 
 ## Scope: what this plugin will and will not do
 
-**In scope:** gating Hermes's own provider dispatches (`llm_execution`) on the subscription usage Hermes already reads; the refresh and rate-limit policy; the cache; the refusal wording; documentation.
+**In scope:** gating Hermes's own provider dispatches (`llm_execution`) on the subscription usage Hermes already reads; the near-the-limit notices and optional output cap; the refresh and rate-limit policy; the cache; the read-only status surfaces (`/usage-guard`, the Desktop chip and its route); the refusal wording; documentation.
 
 **Out of scope.** Requests for these are closed with a pointer rather than a debate:
 
 - governing anything outside Hermes — other applications, direct CLI runs, claude.ai, editor extensions;
 - reading credentials or calling a provider's usage endpoint from the plugin. Hermes resolves sign-ins and attaches them; a plugin that holds a token cannot be listed in the catalog;
 - enforcing or changing account and billing settings;
-- guarantees about money. The middleware fails open on exceptions, its context does not attest which credential a request will use, and no percentage can predict the next request's cost.
+- guarantees about money. Hermes's middleware dispatcher fails open when a plugin raises (the guard catches its own errors and refuses, but a failure it cannot catch lets the call through), its context does not attest which credential a request will use, and no percentage can predict the next request's cost.
 
 ## Ground rules
 
@@ -32,9 +32,10 @@ Do not claim this plugin guarantees subscription safety or prevents extra billin
 
 1. Install dev dependencies: `python -m pip install -r requirements-dev.txt`
 2. Run the tests: `python -m pytest tests -v` (host-contract tests skip unless `HERMES_CORE` points at a Hermes checkout).
-3. Lint: `ruff check .`
-4. Package check: `python scripts/package.py`
-5. Manifest checks: `hermes plugins doctor . --ci` and `hermes plugins validate .`
+3. Desktop chip tests: `node tests/desktop/stub-sdk.mjs && node --test tests/desktop/chip.test.mjs`
+4. Lint: `ruff check .`
+5. Package check: `python scripts/package.py`
+6. Manifest checks: `hermes plugins doctor . --ci` and `hermes plugins validate .`
 
 ## Tests to add for behavior changes
 

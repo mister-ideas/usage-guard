@@ -2,6 +2,22 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## 0.5.0 — unreleased
+
+See what the guard would decide, and reliability fixes so the guard never locks out an agent that is under its limit.
+
+- **`/usage-guard`** in any session prints the decision for each guarded provider: ok, near the limit, blocked (with the reason), or allowed without a reading when `fail_open` is on, followed by every window's used percentage and reset time.
+- **Desktop status-bar chip.** A shield next to the bar's other chips shows the highest window across guarded providers. It turns yellow inside the near-wall zone, orange when `fail_open` lets a request through without a reading, and red with "blocked" when the guard refuses. The tooltip lists every window. It refreshes every minute and after each finished turn.
+- Both answer from the guard's own cache file (a new read-only `GET /api/plugins/usage-guard/status` route backs the chip), so checking the status never spends a request against a usage endpoint whose budget the guard itself depends on. They report the same decision function the middleware uses, so the view cannot drift from the behaviour. A missing reading shows as blocked, matching the fail-closed default.
+- **Fix: usage reads failed under a multiplexed gateway.** The background usage read ran on a bare thread, which starts with an empty `contextvars` context. Hermes scopes per-turn secrets in context variables, so under a gateway serving several profiles the read raised `UnscopedSecretError`, every read came back as a failure and, with the default fail-closed policy, requests were refused. The read now runs inside a copy of the caller's context. A regression test pins it.
+- **Fix: a 1% window no longer locks the agent out.** Hermes's Anthropic parser reports a 1% window as exactly 100% (hermes-agent#139916). 0.4.5 refused on that reading and expected it to clear once usage passed 1%, but the refusal itself keeps usage at 1%: a profile using only Hermes stayed refused until the window reset (seen live: half an hour of refusals at "100%" while the account was at 1–2%). Usage never goes down inside one window, so a 100% that follows a reading above 1% in the same window is proven real and still refuses. A lone 100% is now unconfirmed: it does not refuse while extra usage is off, because Anthropic stops requests itself at a real 100%, and it still refuses while extra usage is on, because a real 100% would then bill. `/usage-guard` and the chip name the window as *may really be 1%*, and the gauge shows the confirmed peak. This differs from 0.4.4's removed `assume_inflated_sources`, which read every 100 as 1% and so let a genuinely exhausted window through.
+- **Fix: a window whose reset passed no longer refuses on the clock alone.** When the endpoint goes quiet, `reset_at` moves into the past while the last good snapshot still showed room left — and the guard refused anyway, with "unconfirmed reset", for as long as the endpoint stayed down. An agent nowhere near its limit could not send a single request. A past reset is now only treated as replenishment once a new reading shows a future reset, and only while the reading was at/over the threshold: under the limit the request passes. At or over it, the window stays guarded exactly as before.
+- **Fix: the refusal states the limit plainly.** It now reads "at or over your limit of N% used" after the window that tripped, so a limit below 100% is never mistaken for a full window.
+- **`hydrate_from_paths` is declared in the manifest**, so settings UIs and `hermes plugins validate` see it. A test now checks that every setting the guard reads is declared.
+- **Known issue:** with several profiles on one gateway, `/usage-guard` can answer for the launch profile (Hermes dispatches plugin slash commands there). The guard and the chip are not affected.
+- README: a Desktop demo clip and real screenshots of the chip, a refusal and the blocked chip replace the install screenshot.
+- CI now runs every offline test file (the near-the-wall tests were previously left out of the CI run) and adds a Node job for the Desktop chip.
+
 ## 0.4.5 — 2026-10-26
 
 `assume_inflated_sources` is removed. It could not be made safe.

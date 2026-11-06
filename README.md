@@ -10,13 +10,21 @@
 
 ## See it
 
-![Install and enable from the terminal](docs/media/shot-install.png)
+![Under the limit the request goes through and the shield shows real plan usage; with the limit reached the next request is refused before it is sent, and the chip turns red](docs/media/demo.gif)
 
-**When the wall is hit.** Nothing is sent, and the message says what to do next.
+**The status chip.** A shield in the Hermes Desktop status bar shows the highest usage window. Hover it for every window, its reset time and your limit.
 
-![The refusal message in chat](docs/media/shot-refusal.png)
+![The shield chip and its tooltip: each window, its reset, and the limit](docs/media/shot-chip.png)
 
-**Before the wall.** A short note reaches the agent at 80% and 90%, so it can finish or checkpoint the current work.
+**At the limit.** The request is not sent, and the message says why and what to do next.
+
+![A real refusal in Hermes Desktop](docs/media/shot-refusal.png)
+
+The chip turns red and names the window that tripped.
+
+![The blocked chip and its tooltip](docs/media/shot-chip-blocked.png)
+
+**Before the limit.** A short note reaches the agent at 80% and 90%, so it can finish or checkpoint the current work.
 
 ![The early notice at 80 percent used](docs/media/shot-near-wall.png)
 
@@ -24,7 +32,7 @@
 
 ![The refusal when the usage reading is unavailable](docs/media/shot-unavailable.png)
 
-The screenshots use example values. Each one is rendered from the plugin's own message text, so the wording is exact.
+The clip, the chip and the refusal are captured in Hermes Desktop, with the limit lowered for the demo. The two notice cards use example values and are rendered from the plugin's own message text, so the wording is exact.
 
 ## Quick start
 
@@ -50,16 +58,17 @@ hermes plugins update usage-guard
 hermes plugins remove usage-guard
 ```
 
-Restart Hermes after an update. The catalog pins one reviewed commit, so an update reaches you only after a maintainer merges the new pin.
+Restart Hermes after an update: the gateway for the guard itself, and Hermes Desktop's backend (or the whole app) for the status chip, whose route is mounted when the backend starts. The catalog pins one reviewed commit, so an update reaches you only after a maintainer merges the new pin.
 
 ## What it does
 
 - **Blocks at the wall.** It refuses a provider call once a subscription usage window reads fully used (default `threshold_percent: 100`). The request is not sent, so no paid overage is spent.
 - **Warns before the wall.** At 80% and 90% one short note goes into the agent's context, so long work can wind down in time.
-- **Fails closed.** A missing, malformed or stale reading is refused, not guessed. `fail_open` is off by default.
+- **Fails closed, except where a low reading is still a fact.** Missing or malformed evidence refuses. A past `reset_at` does not: a window under the threshold stays usable until a fresh reading shows a future reset. `fail_open` is off by default.
 - **Survives rate limits.** A 429 from the usage endpoint never refuses a request by itself. The guard backs off and keeps using the last good reading for up to 15 minutes.
 - **Covers long runs.** Every main-loop request is checked, including each step of a long tool-calling turn and subagent requests, not only the first prompt. MoA turns are checked against every guarded slot.
 - **Optional output cap.** Near the wall it can lower the output budget so an in-flight request spills less. It is off by default, because a cap can cut an answer short.
+- **Shows its decision.** `/usage-guard` in any session prints what the guard would decide right now for each guarded provider, with every window and its reset time. In Hermes Desktop a status-bar chip shows the highest window and turns yellow near the wall and red when blocked. Both read the guard's own cache, so checking them never spends a usage request.
 - **Private.** It holds no credentials, makes no usage request of its own, and keeps one local cache file of windows and timestamps.
 
 ## How it compares
@@ -69,9 +78,8 @@ Restart Hermes after an update. The catalog pins one reviewed commit, so an upda
 | `hermes usage` / `/usage` (native) | Shows the account's limit windows, once | No |
 | Usage display plugins: usage-flame, provider-usage, usage-stats, model-usage-status, ai-usage-tracker, token-cost-meter | Live windows, chips and widgets in the Desktop status bar | No. None of these registers middleware, so none can refuse a call |
 | lightningai-rate-limit | Throttles one provider's request rate (about 15 per minute) | No. It limits request rate and does not read subscription windows |
-| **usage-guard** | Reads subscription windows, warns at 80% and 90%, and refuses the call at the wall | **Yes**, fail-closed |
-
-This table covers usage and quota. I have not compared file-display or git-change features in this pass.
+| Spend-cap plugins | Estimate spend from token counts and list prices, and stop at a cap you set | On an estimate. They do not read the subscription windows your plan actually enforces |
+| **usage-guard** | Reads your plan's real usage windows, warns at 80% and 90%, refuses the call at your limit before it is sent, and shows it all in a status-bar chip | **Yes**, fail-closed |
 
 ## Configuration
 
@@ -93,6 +101,7 @@ The full table, with every key and its meaning, is in [docs/reference.md#configu
 - **It cannot recall a request that is already running.** A request that starts inside the allowance and spills into paid usage within the same provider call is billed. The guard stops the next request.
 - **It does not gate auxiliary calls on stock Hermes.** Compression, titles and background review are not covered. Core change [#140694](https://github.com/NousResearch/hermes-agent/pull/140694) would close that gap; it is open and not yet released.
 - **It reads the account, not the request.** With credential pools or per-session overrides, treat the reading as account-level evidence.
+- **`/usage-guard` and multi-profile gateways.** When one gateway serves several profiles, Hermes runs a plugin's slash command in the profile the gateway was launched with, so `/usage-guard` can report that profile's limit and reading. The guard itself, and the Desktop chip, use the right profile. Run `/usage-guard` from a gateway launched with the profile you want, or read the chip.
 - **It depends on undocumented usage endpoints** (Anthropic OAuth and Codex usage), which can change without notice.
 - **It shares the account's usage budget with everything else that reads it.** Those endpoints are limited per account, not per plugin, so a second reader with its own cadence — another plugin, the CLI, a script — can push the account into a 429 and leave the guard with nothing fresh to read. Its cache is a plain JSON file in its plugin data dir (`usage-guard/usage.json`: `windows` of `label`, `used_percent`, `reset_at`), and any reader may prefer that file to a request of its own: it is the cheapest way to keep one read per account per window. The same works in reverse: set `hydrate_from_paths` to a file another reader maintains and the guard borrows its reading instead of making its own request.
 
@@ -106,10 +115,13 @@ Subscription plans now bill extra usage once a window is exhausted, and on many 
 
 | Symptom | What is happening | What to do |
 |---|---|---|
-| Blocked at a few percent | On stock Hermes, upstream's Anthropic parser scales any `utilization` ≤ 1 by 100, so a window at 0–1% can arrive as 100%. It hits every account right after a reset. | Nothing to fix here: it is [upstream's parser](https://github.com/NousResearch/hermes-agent/issues/58226), fixed by [PR #139916](https://github.com/NousResearch/hermes-agent/pull/139916). Until a release carries it: wait for the reset, or drop the provider from `provider_keys` if you accept it being ungated. |
-| Blocked although usage looks fine | The window the notice names is at/over the threshold *in the snapshot the guard read*. The notice prints the label, the value and the reset time. | Read the notice: it names the window. Compare with `hermes usage`. A stale reset is never treated as replenishment. |
+| Shows 100% right after a reset | On stock Hermes, upstream's Anthropic parser scales any `utilization` ≤ 1 by 100, so a window at 1% arrives as exactly 100%. Anthropic reports whole percentages, so only 100 is ambiguous. | Nothing to do. A lone 100% is shown as unconfirmed (*may really be 1%*) and does not refuse while extra usage is off, because Anthropic itself stops requests at a real 100%. A 100% that follows a higher reading in the same window is real and refuses, and so does any 100% while extra usage is on. Upstream fix: [PR #139916](https://github.com/NousResearch/hermes-agent/pull/139916). |
+| Blocked although usage looks fine | The window the notice names is at/over the threshold *in the snapshot the guard read*. The notice prints the label, the value and the reset time. | Read the notice: it names the window. Compare with `hermes usage`. A reset that has passed is only treated as replenishment once a new reading shows a future reset — and only while the reading was at/over the limit. |
 | Refused, notice says its settings are invalid | A setting has the wrong shape. A broken policy refuses by design rather than silently disabling the guard. | Fix `plugins.entries.usage-guard.settings`, or run `hermes plugins disable usage-guard`. The `plugins.usage-guard` log line names the setting. |
 | Refused: "cannot confirm your remaining allowance" | The usage reading is missing, empty or stale beyond `stale_grace_s` (900s). The notice names the cause. | Run `hermes usage --provider <id>` to check the reading. Read the `plugins.usage-guard` log for detail. Set `fail_open: true` only if you accept sending without a reading. |
+| What would it decide right now? | — | Run `/usage-guard` in a session, or hover the shield chip in the Desktop status bar. Both answer from the cached reading and show the reason for any refusal. |
+| `/usage-guard` shows another limit than the refusals | One gateway is serving several profiles, and Hermes ran the command in the launch profile. | The chip and the guard itself are right. See [Limits](#limits-what-it-cannot-do). |
+| The Desktop chip does not appear | The chip hides when its status route does not answer. Hermes Desktop's backend mounts plugin routes when it starts, so a plugin installed or updated while it runs is not served yet. | Restart Hermes Desktop (or its backend), then run ⌘K → **Reload desktop plugins**. |
 | It never blocks | The provider may not be listed in `provider_keys`, the window may genuinely be under the threshold, or the call may not be gated at all. | Check the log: the guard logs `usage-guard active: gating providers [...]` on its first guarded dispatch, and names each provider that passes through because it is not gated. See also [What stock Hermes can and cannot gate](docs/reference.md#what-stock-hermes-can-and-cannot-gate). |
 | "reports no account usage to guard" warning | The account has no subscription usage surface — an Anthropic API-key account publishes no limits on the OAuth usage endpoint. | Expected: the provider passes through rather than being blocked. Remove it from `provider_keys` to silence the warning. |
 | "usage endpoint rate-limiting" messages | The usage endpoint answered 429. The guard backs off (honouring `Retry-After`) and keeps deciding on the last good snapshot. | Nothing — a rate limit never refuses a request. Raising a floor or refreshing harder only deepens the backoff. |
@@ -120,6 +132,7 @@ Subscription plans now bill extra usage once a window is exhausted, and on many 
 ```sh
 python -m pip install -r requirements-dev.txt
 python -m pytest tests -v          # offline suite (host-contract tests skip)
+node tests/desktop/stub-sdk.mjs && node --test tests/desktop/chip.test.mjs   # Desktop chip
 ruff check .
 hermes plugins validate . --install-deps
 python scripts/package.py          # dist/usage-guard-<version>.zip
