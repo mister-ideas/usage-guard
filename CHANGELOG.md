@@ -2,6 +2,10 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
+## Unreleased
+
+- **`refusal_mode`** (`notice` default, or `empty`). A refusal is a synthetic assistant message, which Hermes treats as a finished answer, so a profile's `fallback_providers` is never tried. With `refusal_mode: empty` the refusal is an empty message instead: Hermes retries (refused again at zero cost) and then switches to the fallback provider. Configuration errors keep the explanatory notice. The default is unchanged.
+
 ## 0.5.0 — 2026-11-06
 
 See what the guard would decide, and reliability fixes so the guard never locks out an agent that is under its limit.

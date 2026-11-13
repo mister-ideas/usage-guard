@@ -93,7 +93,19 @@ DEFAULT_SOURCE_MIN_INTERVALS: dict[str, float] = {
     "openrouter": 30.0,
 }
 
+# How a usage refusal is delivered to the agent.
+#   notice  a synthetic assistant message explaining the refusal. The turn ends
+#           there; Hermes sees a normal answer, so a configured fallback provider
+#           is NOT tried.
+#   empty   an empty assistant message. Hermes's empty-response recovery retries
+#           (the retries are refused again at zero cost) and then activates the
+#           profile's fallback provider. With no fallback configured the turn ends
+#           as "(empty)", so enable this only on profiles that have one. The reason
+#           is written to the log either way.
+REFUSAL_MODES = ("notice", "empty")
+
 DEFAULTS: dict[str, Any] = {
+    "refusal_mode": "notice",
     "provider_keys": list(DEFAULT_PROVIDER_KEYS),
     "provider_sources": dict(DEFAULT_PROVIDER_SOURCES),
     "source_scales": dict(DEFAULT_SOURCE_SCALES),
@@ -966,6 +978,13 @@ def _read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any
         else:
             settings["source_min_intervals"] = intervals
 
+        refusal_mode = get_config("refusal_mode", DEFAULTS["refusal_mode"])
+        if refusal_mode not in REFUSAL_MODES:
+            config_ok = False
+            LOG.warning("usage-guard: setting %s is invalid (%r); guarded requests are refused until it is fixed in plugins.entries.usage-guard.settings", "refusal_mode", refusal_mode)
+        else:
+            settings["refusal_mode"] = refusal_mode
+
         fail_open = get_config("fail_open", DEFAULTS["fail_open"])
         if not isinstance(fail_open, bool):
             config_ok = False
@@ -1680,11 +1699,21 @@ def _gate_moa(kwargs: dict[str, Any], settings: dict[str, Any], config_ok: bool,
         if not decision.allow:
             LOG.warning("usage-guard refused MoA preset=%s provider=%s model=%s: %s",
                         preset_name, slot_provider, kwargs.get("model"), decision.reason)
-            return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
+            return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"),
+                                     _refusal_text(settings, config_ok, decision.notice))
     return downstream(request)
 
 
 # ── response shaping (per documented Hermes adapter shapes) ──────────────────
+
+def _refusal_text(settings: dict[str, Any], config_ok: bool, notice: str) -> str:
+    """The text of a refusal. ``refusal_mode: empty`` sends nothing, so Hermes
+    runs its empty-response recovery (retry, then the profile's fallback
+    provider). Configuration errors always keep the loud notice."""
+    if config_ok and settings.get("refusal_mode") == "empty":
+        return ""
+    return notice
+
 
 def _blocked_response(api_mode: Any, model: Any, text: str) -> Any:
     model = model if isinstance(model, str) else ""
@@ -1766,7 +1795,8 @@ def gate_llm_execution(config_reader: Callable[[str, Any], Any], **kwargs: Any) 
             return downstream(request)
         LOG.warning("usage-guard refused provider=%s model=%s: %s%s",
                     provider, kwargs.get("model"), decision.reason, _reading_evidence(source_key))
-        return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"), decision.notice)
+        return _blocked_response(kwargs.get("api_mode"), kwargs.get("model"),
+                                     _refusal_text(settings, config_ok, decision.notice))
     except Exception:
         if dispatched:
             # Preserve provider errors/interruption and normal retry semantics.
