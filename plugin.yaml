@@ -14,6 +14,10 @@ provides_middleware:
   - llm_request
 requires_env: []
 config_schema:
+  refusal_mode:
+    type: str
+    default: notice
+    description: "How a usage refusal reaches the agent: 'notice' (explanatory message, ends the turn) or 'empty' (empty reply, so Hermes retries and then switches to the profile's fallback provider; use only on profiles that have one)"
   provider_keys:
     type: list
     default: ["anthropic", "openai-codex"]

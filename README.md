@@ -91,6 +91,7 @@ Settings live under `plugins.entries.usage-guard.settings`. The defaults are saf
 | `warn_percents` | `[80, 90]` | Levels that trigger the early note. `[]` turns it off |
 | `fail_open` | `false` | Send requests when the reading is unavailable. Keep `false` unless you accept the risk |
 | `provider_keys` | `["anthropic", "openai-codex"]` | Providers that are gated. Add custom provider IDs here |
+| `refusal_mode` | `notice` | `notice` ends the turn with an explanation. `empty` sends an empty reply, so Hermes retries and then switches to the profile's `fallback_providers`; use it only on profiles that have one (otherwise the turn ends as "(empty)") |
 | `max_tokens_near_wall` | `0` | Output cap near the wall. `0` is off |
 | `hydrate_from_paths` | `[]` | Files to borrow a recent usage snapshot from, instead of spending a request of our own. Empty is off |
 
