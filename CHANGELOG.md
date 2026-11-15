@@ -2,9 +2,13 @@
 
 All notable changes to this plugin. Versions follow [SemVer](https://semver.org); each release is a `vX.Y.Z` tag with a GitHub Release.
 
-## Unreleased
+## 0.6.0 — 2026-11-15
 
-- **`refusal_mode`** (`notice` default, or `empty`). A refusal is a synthetic assistant message, which Hermes treats as a finished answer, so a profile's `fallback_providers` is never tried. With `refusal_mode: empty` the refusal is an empty message instead: Hermes retries (refused again at zero cost) and then switches to the fallback provider. Configuration errors keep the explanatory notice. The default is unchanged. The value is case-insensitive. Host-contract tests now pin the two Hermes behaviours the mode relies on (an empty refusal reads as a repeated empty; the empty-response ladder ends in the fallback chain). The reference documents the trade-offs: the reason is only in the log, a short retry wait on every refused turn, housekeeping turns end without falling back, and the fallback must be a different provider.
+A refusal can now hand the turn to the profile's fallback provider instead of ending it.
+
+- **`refusal_mode`** (`notice` default, or `empty`; case-insensitive). A refusal is a synthetic assistant message, which Hermes treats as a finished answer, so a profile's `fallback_providers` was never tried. With `refusal_mode: empty` the refusal is an empty message instead: Hermes retries (each retry is refused again, never dispatched) and then switches to the fallback provider. Configuration errors and an unresolvable MoA preset keep the explanatory notice. The default is unchanged. Contributed by @arodagent (#29).
+- **Trade-offs are documented** in the reference: the reason is only in the log, every refused turn waits one retry backoff (about 5–7.5 s) before the fallback, a turn whose previous step was text plus only housekeeping tools ends on that text instead of falling back, and the fallback must be a different provider (listed in `provider_keys` if it bills).
+- **Host-contract tests** pin the two Hermes behaviours the mode relies on: an empty refusal normalises to a repeated empty in every API mode, and the empty-response ladder ends in the fallback chain.
 
 ## 0.5.0 — 2026-11-06
 
