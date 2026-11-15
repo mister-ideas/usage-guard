@@ -143,3 +143,47 @@ def test_poll_reads_secrets_under_a_multiplexed_gateway(guard):
         scope.reset_secret_scope(secrets)
         scope.reset_multiplex_context(mux)
     assert seen == ["per-turn"]
+
+
+# ── refusal_mode: empty relies on Hermes's empty-response recovery ───────────
+# These pin the two host behaviours the mode needs, so a Hermes change that
+# would silently turn every refusal into "(empty)" fails here first.
+
+class _EmptyStreakAgent:
+    """The attributes the core's empty-response guard reads from an agent."""
+
+    model = "m"
+    provider = "anthropic"
+    base_url = ""
+    api_key = ""
+    _empty_content_retries = 0
+
+
+@pytest.mark.parametrize("api_mode", ["chat_completions", "anthropic_messages", "codex_responses"])
+def test_an_empty_refusal_reads_as_a_repeated_empty_to_the_core(guard, api_mode):
+    """Each empty refusal normalises to no content, no tool calls and no
+    reasoning, and two in a row are a deterministic empty, so Hermes skips its
+    remaining retries and walks the fallback chain."""
+    transports = importlib.import_module("agent.transports")
+    empty_guard = importlib.import_module("agent.empty_response_guard")
+    refusal = guard._blocked_response(api_mode, "m", "")
+
+    normalized = transports.get_transport(api_mode).normalize_response(refusal)
+    assert not (normalized.content or "").strip()
+    assert not getattr(normalized, "tool_calls", None)
+    assert not getattr(normalized, "reasoning", None)
+
+    agent = _EmptyStreakAgent()
+    agent.api_mode = api_mode
+    for _ in range(2):
+        empty_guard.record_empty_attempt(agent, finish_reason="stop", response=refusal,
+                                         observed_generation=False)
+        agent._empty_content_retries += 1
+    assert empty_guard.deterministic_empty(agent) is True
+
+
+def test_the_core_falls_back_after_empty_responses():
+    """The empty-response ladder still ends in the fallback chain."""
+    ladder = importlib.import_module("agent.turn_empty_response")
+    src = inspect.getsource(ladder.recover_empty_response)
+    assert "_fallback_chain" in src and "_try_activate_fallback" in src
